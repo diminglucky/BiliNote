@@ -1,10 +1,12 @@
 import os
 import json
 import logging
+import subprocess
 import tempfile
 from abc import ABC
 from typing import Union, Optional, List
 
+import requests
 import yt_dlp
 
 from app.downloaders.base import Downloader, DownloadQuality, QUALITY_MAP
@@ -16,6 +18,11 @@ from app.utils.url_parser import extract_video_id
 from app.services.cookie_manager import CookieConfigManager
 
 logger = logging.getLogger(__name__)
+
+BILIBILI_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
 
 class BilibiliDownloader(Downloader, ABC):
@@ -46,7 +53,8 @@ class BilibiliDownloader(Downloader, ABC):
         video_url: str,
         output_dir: Union[str, None] = None,
         quality: DownloadQuality = "fast",
-        need_video:Optional[bool]=False
+        need_video: Optional[bool] = False,
+        skip_download: bool = False,
     ) -> AudioDownloadResult:
         if output_dir is None:
             output_dir = get_data_dir()
@@ -59,6 +67,11 @@ class BilibiliDownloader(Downloader, ABC):
         if cached_audio_path and os.path.exists(cached_audio_path):
             info = self._cached_info(video_id) or self._minimal_info(video_id)
             return self._build_audio_result(info, cached_audio_path)
+
+        if skip_download:
+            info = self._extract_info(video_url)
+            audio_path = cached_audio_path or os.path.join(output_dir, f"{info.get('id')}.mp3")
+            return self._build_audio_result(info, audio_path)
 
         output_path = os.path.join(output_dir, "%(id)s.%(ext)s")
 
@@ -86,7 +99,8 @@ class BilibiliDownloader(Downloader, ABC):
             if cached_audio_path and os.path.exists(cached_audio_path):
                 info = self._cached_info(video_id) or self._minimal_info(video_id)
                 return self._build_audio_result(info, cached_audio_path)
-            raise
+            logger.warning("yt-dlp 下载 B 站音频失败，切换到 B 站 API 兜底下载", exc_info=True)
+            return self._download_audio_via_api(video_url, output_dir, quality)
 
         audio_path = os.path.join(output_dir, f"{info.get('id')}.mp3")
         return self._build_audio_result(info, audio_path)
@@ -100,8 +114,168 @@ class BilibiliDownloader(Downloader, ABC):
         }
         if self._cookiefile:
             ydl_opts['cookiefile'] = self._cookiefile
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return ydl.extract_info(video_url, download=False)
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(video_url, download=False)
+        except Exception:
+            logger.warning("yt-dlp 提取 B 站元信息失败，切换到 B 站 API", exc_info=True)
+            return self._extract_info_via_api(video_url)
+
+    def _headers(self) -> dict:
+        headers = {
+            "User-Agent": BILIBILI_UA,
+            "Referer": "https://www.bilibili.com",
+            "Origin": "https://www.bilibili.com",
+            "Accept": "*/*",
+        }
+        if self._cookie:
+            headers["Cookie"] = self._cookie
+        return headers
+
+    def _api_get(self, url: str, params: dict) -> dict:
+        resp = requests.get(url, params=params, headers=self._headers(), timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"B 站 API 返回错误: code={data.get('code')}, message={data.get('message')}")
+        return data.get("data") or {}
+
+    def _extract_info_via_api(self, video_url: str) -> dict:
+        bvid = extract_video_id(video_url, "bilibili")
+        if not bvid:
+            raise RuntimeError("无法从 B 站链接提取 BV 号")
+
+        data = self._api_get(
+            "https://api.bilibili.com/x/web-interface/view",
+            {"bvid": bvid},
+        )
+        return {
+            "id": data.get("bvid") or bvid,
+            "title": data.get("title") or bvid,
+            "duration": data.get("duration") or 0,
+            "thumbnail": data.get("pic"),
+            "tags": [item for item in [data.get("tname"), data.get("tname_v2")] if item],
+            "cid": data.get("cid"),
+            "raw_api_info": data,
+        }
+
+    def _play_info_via_api(self, info: dict) -> dict:
+        bvid = info.get("id")
+        cid = info.get("cid")
+        if not bvid or not cid:
+            raise RuntimeError("B 站播放信息缺少 bvid/cid")
+        return self._api_get(
+            "https://api.bilibili.com/x/player/playurl",
+            {
+                "bvid": bvid,
+                "cid": cid,
+                "fnval": 16,
+                "fourk": 1,
+            },
+        )
+
+    @staticmethod
+    def _stream_candidates(item: dict) -> List[str]:
+        urls = []
+        for key in ("baseUrl", "base_url"):
+            if item.get(key):
+                urls.append(item[key])
+        for key in ("backupUrl", "backup_url"):
+            backup = item.get(key) or []
+            urls.extend(backup)
+        return urls
+
+    def _download_stream(self, items: List[dict], output_path: str) -> None:
+        errors = []
+        for item in items:
+            for url in self._stream_candidates(item):
+                try:
+                    with requests.get(url, headers=self._headers(), stream=True, timeout=(10, 120)) as resp:
+                        resp.raise_for_status()
+                        with open(output_path, "wb") as f:
+                            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                                if chunk:
+                                    f.write(chunk)
+                    if os.path.getsize(output_path) > 0:
+                        return
+                except Exception as exc:
+                    errors.append(str(exc))
+                    if os.path.exists(output_path):
+                        os.remove(output_path)
+        raise RuntimeError("B 站流下载失败: " + "; ".join(errors[-3:]))
+
+    @staticmethod
+    def _run_ffmpeg(args: List[str]) -> None:
+        result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout or "ffmpeg 执行失败").strip()[-1000:])
+
+    @staticmethod
+    def _quality_bitrate(quality: DownloadQuality) -> str:
+        key = getattr(quality, "value", quality)
+        return QUALITY_MAP.get(key, "64")
+
+    def _download_audio_via_api(
+        self,
+        video_url: str,
+        output_dir: str,
+        quality: DownloadQuality,
+    ) -> AudioDownloadResult:
+        info = self._extract_info_via_api(video_url)
+        play_info = self._play_info_via_api(info)
+        audios = (play_info.get("dash") or {}).get("audio") or []
+        if not audios:
+            raise RuntimeError("B 站 API 未返回可用音频流")
+
+        audios = sorted(audios, key=lambda item: item.get("bandwidth") or 0, reverse=True)
+        video_id = info.get("id")
+        tmp_audio = os.path.join(output_dir, f"{video_id}.audio.m4s")
+        audio_path = os.path.join(output_dir, f"{video_id}.mp3")
+        self._download_stream(audios, tmp_audio)
+        try:
+            self._run_ffmpeg([
+                "ffmpeg", "-y",
+                "-i", tmp_audio,
+                "-vn",
+                "-acodec", "libmp3lame",
+                "-b:a", f"{self._quality_bitrate(quality)}k",
+                audio_path,
+            ])
+        finally:
+            if os.path.exists(tmp_audio):
+                os.remove(tmp_audio)
+        return self._build_audio_result(info, audio_path)
+
+    def _download_video_via_api(self, video_url: str, output_dir: str) -> str:
+        info = self._extract_info_via_api(video_url)
+        play_info = self._play_info_via_api(info)
+        videos = (play_info.get("dash") or {}).get("video") or []
+        if not videos:
+            raise RuntimeError("B 站 API 未返回可用视频流")
+
+        # 这里只用于截图/视频理解抽帧，480P 左右更稳，也避免有 Cookie 时拉到 4K 大文件。
+        videos = sorted(
+            videos,
+            key=lambda item: (
+                0 if (item.get("id") or 0) <= 32 else 1,
+                item.get("bandwidth") or 0,
+            ),
+        )
+        video_id = info.get("id")
+        tmp_video = os.path.join(output_dir, f"{video_id}.video.m4s")
+        video_path = os.path.join(output_dir, f"{video_id}.mp4")
+        self._download_stream(videos, tmp_video)
+        try:
+            self._run_ffmpeg([
+                "ffmpeg", "-y",
+                "-i", tmp_video,
+                "-c", "copy",
+                video_path,
+            ])
+        finally:
+            if os.path.exists(tmp_video):
+                os.remove(tmp_video)
+        return video_path
 
     def _cached_info(self, video_id: str) -> Optional[dict]:
         if not video_id:
@@ -183,10 +357,14 @@ class BilibiliDownloader(Downloader, ABC):
         if self._cookiefile:
             ydl_opts['cookiefile'] = self._cookiefile
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=True)
-            video_id = info.get("id")
-            video_path = os.path.join(output_dir, f"{video_id}.mp4")
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(video_url, download=True)
+                video_id = info.get("id")
+                video_path = os.path.join(output_dir, f"{video_id}.mp4")
+        except Exception:
+            logger.warning("yt-dlp 下载 B 站视频失败，切换到 B 站 API 兜底下载", exc_info=True)
+            video_path = self._download_video_via_api(video_url, output_dir)
 
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"视频文件未找到: {video_path}")

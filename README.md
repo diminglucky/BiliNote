@@ -310,6 +310,30 @@ sudo apt install ffmpeg
 
 具体 `fast-whisper` 配置方法，请参考：[fast-whisper 项目地址](http://github.com/SYSTRAN/faster-whisper#requirements)
 
+Windows + NVIDIA 显卡本地部署时，建议使用独立虚拟环境安装 CUDA 版 PyTorch，并在「设置 → 音频转写配置」中选择 `fast-whisper`：
+
+```bash
+conda create -n play python=3.12
+conda activate play
+pip install -r backend/requirements.txt
+# 按显卡驱动支持情况安装 CUDA 版 torch，例如 cu128：
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+```
+
+RTX 4060 Ti 一类显卡推荐从 `medium` 模型开始：速度和准确率比较均衡，显存压力也更可控。切换配置后可用下面的命令快速确认 CUDA 是否可用：
+
+```bash
+python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0))"
+```
+
+### B 站下载 412 兜底
+
+部分网络环境下，`yt-dlp` 抓取 Bilibili 网页可能返回 `HTTP Error 412: Precondition Failed`。这不一定是 Cookie 缺失导致的，公开视频也可能因为请求特征或代理链路被 B 站网页风控拦截。
+
+后端的 B 站下载器会优先使用 `yt-dlp`；当网页解析触发 412 或下载失败时，会自动切换到 B 站公开 API 获取 `bvid/cid/playurl`，再下载音频流并转码为 mp3。启用「视频理解」或「原片截图」时，也会用同一套 API 兜底下载低码率视频流用于抽帧，避免不必要地拉取 4K 大文件。
+
+仍然需要 Cookie 的场景包括：会员专享、登录可见、年龄限制、高清权限受限、AI 字幕需要登录态等。公开视频转写通常不强依赖 Cookie。
+
 ### 🐳 使用 Docker 一键部署
 
 确保你已安装 Docker，然后直接拉取预构建镜像运行：
