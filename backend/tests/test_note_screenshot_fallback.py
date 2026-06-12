@@ -136,6 +136,8 @@ def _load_note_module():
 
 note_module = _load_note_module()
 NoteGenerator = note_module.NoteGenerator
+VisualScreenshotAgent = note_module.VisualScreenshotAgent
+VisualScreenshotState = note_module.VisualScreenshotState
 
 
 class TestNoteScreenshotFallback(unittest.TestCase):
@@ -172,6 +174,23 @@ class TestNoteScreenshotFallback(unittest.TestCase):
     def test_sampling_interval_grows_for_long_videos(self):
         self.assertEqual(NoteGenerator._fallback_sampling_interval(5 * 60), 6)
         self.assertGreater(NoteGenerator._fallback_sampling_interval(4 * 60 * 60), 20)
+
+    def test_visual_agent_run_exposes_state(self):
+        agent = VisualScreenshotAgent(image_output_dir=".", image_base_url="/static/screenshots")
+        markdown = (
+            "## 背景说明 *Content-[00:10]\n"
+            "这里只讲背景和目标，不需要截图。\n"
+        )
+        state = VisualScreenshotState(markdown=markdown, video_path=pathlib.Path("video.mp4"), duration=120)
+
+        result = agent.run(state)
+
+        self.assertIs(result, state)
+        self.assertEqual(state.markdown, markdown)
+        self.assertEqual(state.matches, [])
+        self.assertEqual(state.visual_plans, [])
+        self.assertEqual(state.generated_images, [])
+        self.assertEqual(state.diagnostics, [])
 
     def test_fallback_images_are_inserted_near_content_sections(self):
         generator = NoteGenerator.__new__(NoteGenerator)
