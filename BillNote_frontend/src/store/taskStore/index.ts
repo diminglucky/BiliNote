@@ -13,6 +13,7 @@ export type TaskStatus =
   | 'TRANSCRIBING'
   | 'SUMMARIZING'
   | 'FORMATTING'
+  | 'ENHANCING'
   | 'SAVING'
   | 'SUCCESS'
   | 'FAILED'
@@ -52,6 +53,7 @@ export interface Task {
   markdown: string|Markdown [] //为了兼容之前的笔记
   transcript: Transcript
   status: TaskStatus
+  message?: string
   audioMeta: AudioMeta
   createdAt: string
   formData: {
@@ -178,12 +180,34 @@ export const useTaskStore = create<TaskStore>()(
         if (!task) return
 
         const newFormData = payload || task.formData
+        const previousStatus = task.status
+        set(state => ({
+          tasks: state.tasks.map(t =>
+              t.id === id
+                  ? {
+                    ...t,
+                    formData: newFormData,
+                    status: 'PENDING',
+                  }
+                  : t
+          ),
+        }))
         try {
           await generateNote({
             ...newFormData,
             task_id: id,
           })
         } catch (e: any) {
+          set(state => ({
+            tasks: state.tasks.map(t =>
+                t.id === id
+                    ? {
+                      ...t,
+                      status: previousStatus,
+                    }
+                    : t
+            ),
+          }))
           // 就绪门禁：转写模型未下载好。不要把任务标成 PENDING（会一直转），
           // 给提示让用户先去下载。
           if (e?.data?.reason === 'transcriber_model_not_ready') {

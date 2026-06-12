@@ -44,6 +44,8 @@ const steps = [
   { label: '下载音频', key: 'DOWNLOADING' },
   { label: '转写文字', key: 'TRANSCRIBING' },
   { label: '总结内容', key: 'SUMMARIZING' },
+  { label: '整理截图', key: 'FORMATTING' },
+  { label: '增强截图', key: 'ENHANCING' },
   { label: '保存完成', key: 'SUCCESS' },
 ]
 
@@ -325,6 +327,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const getCurrentTask = useTaskStore.getState().getCurrentTask
   const currentTask = useTaskStore(state => state.getCurrentTask())
   const taskStatus = currentTask?.status || 'PENDING'
+  const taskMessage = currentTask?.message
   const retryTask = useTaskStore.getState().retryTask
   const isMultiVersion = Array.isArray(currentTask?.markdown)
   const [showTranscribe, setShowTranscribe] = useState(false)
@@ -422,7 +425,9 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         <Loading className="h-5 w-5" />
         <div className="text-center text-sm">
           <p className="text-lg font-bold">正在生成笔记，请稍候…</p>
-          <p className="mt-2 text-xs text-neutral-500">这可能需要几秒钟时间，取决于视频长度</p>
+          <p className="mt-2 text-xs text-neutral-500">
+            {taskMessage || '这可能需要几秒到几分钟，取决于视频长度'}
+          </p>
         </div>
       </div>
     )
@@ -497,10 +502,15 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                   <ChatPanel taskId={currentTask.id} mode="full" onModeChange={setShowChat} />
                 </div>
               ) : (
-              <>
-              <ScrollArea className="min-w-0 flex-1">
-                <div className="px-2">
-                  <VideoBanner
+	              <>
+	              <ScrollArea className="min-w-0 flex-1">
+	                {taskStatus === 'ENHANCING' && (
+	                  <div className="sticky top-0 z-10 border-b bg-blue-50 px-4 py-2 text-sm text-blue-700">
+	                    {taskMessage || '正在逐张插入关键截图，笔记内容会自动更新'}
+	                  </div>
+	                )}
+	                <div className="px-2">
+	                  <VideoBanner
                     audioMeta={currentTask?.audioMeta}
                     videoUrl={currentTask?.formData?.video_url}
                   />

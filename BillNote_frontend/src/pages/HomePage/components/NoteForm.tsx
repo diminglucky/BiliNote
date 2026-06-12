@@ -157,14 +157,6 @@ const NoteForm = () => {
   const videoUnderstandingEnabled = useWatch({ control: form.control, name: 'video_understanding' })
   const editing = currentTask && currentTask.id
 
-  useEffect(() => {
-    if (videoUnderstandingEnabled) return
-    const format = form.getValues('format') || []
-    if (format.includes('screenshot')) {
-      form.setValue('format', format.filter(item => item !== 'screenshot'))
-    }
-  }, [videoUnderstandingEnabled, form])
-
   const goModelAdd = () => {
     navigate("/settings/model");
   };
@@ -563,7 +555,7 @@ const NoteForm = () => {
                   onChange={field.onChange}
                   disabledMap={{
                     link: platform === 'local',
-                    screenshot: !videoUnderstandingEnabled,
+                    screenshot: false,
                   }}
                 />
                 <FormMessage />

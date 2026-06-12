@@ -18,7 +18,7 @@ export const HomePage: FC = () => {
   useEffect(() => {
     if (!currentTask) {
       setStatus('idle')
-    } else if (currentTask.status === 'SUCCESS') {
+    } else if (currentTask.status === 'SUCCESS' || (currentTask.status === 'ENHANCING' && currentTask.markdown)) {
       setStatus('success')
     } else if (currentTask.status === 'FAILED') {
       setStatus('failed')

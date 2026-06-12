@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -26,7 +27,6 @@ def _install_stubs():
 
     modules = {
         "fastapi": types.ModuleType("fastapi"),
-        "pydantic": types.ModuleType("pydantic"),
         "dotenv": types.ModuleType("dotenv"),
         "app.downloaders": types.ModuleType("app.downloaders"),
         "app.downloaders.base": types.ModuleType("app.downloaders.base"),
@@ -68,7 +68,6 @@ def _install_stubs():
 
     modules["fastapi"].FastAPI = object
     modules["fastapi"].HTTPException = Exception
-    modules["pydantic"].HttpUrl = str
     modules["dotenv"].load_dotenv = lambda *_args, **_kwargs: None
     modules["app.downloaders.base"].Downloader = object
     modules["app.downloaders.bilibili_downloader"].BilibiliDownloader = object
@@ -138,9 +137,23 @@ note_module = _load_note_module()
 NoteGenerator = note_module.NoteGenerator
 VisualScreenshotAgent = note_module.VisualScreenshotAgent
 VisualScreenshotState = note_module.VisualScreenshotState
+visual_agent_module = sys.modules["app.services.visual_screenshot_agent"]
 
 
 class TestNoteScreenshotFallback(unittest.TestCase):
+    def setUp(self):
+        self._graph_runner_patch = patch.object(
+            visual_agent_module,
+            "run_visual_screenshot_graph",
+            side_effect=lambda agent, state: agent.run_nodes_inline(state),
+        )
+        self._graph_runner_patch.start()
+        self._graph_runner_patch_active = True
+
+    def tearDown(self):
+        if self._graph_runner_patch_active:
+            self._graph_runner_patch.stop()
+
     def test_fallback_uses_visual_timestamps_without_fixed_three_limit(self):
         expected = [12, 48, 110, 205]
 
@@ -157,7 +170,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
 
         self.assertEqual(result, expected)
 
-    def test_fallback_uses_uniform_timestamps_only_when_visual_scan_fails(self):
+    def test_fallback_timestamp_scan_failure_is_explicit(self):
         class _Reader:
             def __init__(self, *_args, **_kwargs):
                 pass
@@ -167,9 +180,21 @@ class TestNoteScreenshotFallback(unittest.TestCase):
 
         generator = NoteGenerator.__new__(NoteGenerator)
         with patch.object(note_module, "VideoReader", _Reader):
-            result = generator._fallback_screenshot_timestamps(pathlib.Path("video.mp4"), 100)
+            with self.assertRaisesRegex(RuntimeError, "视觉截图时间点提取失败"):
+                generator._fallback_screenshot_timestamps(pathlib.Path("video.mp4"), 100)
 
-        self.assertEqual(result, [20, 50, 80])
+    def test_fallback_timestamp_scan_empty_result_is_explicit(self):
+        class _Reader:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def extract_representative_timestamps(self):
+                return []
+
+        generator = NoteGenerator.__new__(NoteGenerator)
+        with patch.object(note_module, "VideoReader", _Reader):
+            with self.assertRaisesRegex(RuntimeError, "视觉截图时间点提取失败"):
+                generator._fallback_screenshot_timestamps(pathlib.Path("video.mp4"), 100)
 
     def test_sampling_interval_grows_for_long_videos(self):
         self.assertEqual(NoteGenerator._fallback_sampling_interval(5 * 60), 6)
@@ -191,6 +216,98 @@ class TestNoteScreenshotFallback(unittest.TestCase):
         self.assertEqual(state.visual_plans, [])
         self.assertEqual(state.generated_images, [])
         self.assertEqual(state.diagnostics, [])
+        self.assertEqual(state.execution_engine, "local")
+
+    def test_visual_agent_raises_when_langgraph_fails(self):
+        agent = VisualScreenshotAgent(image_output_dir=".", image_base_url="/static/screenshots")
+        markdown = (
+            "## 背景说明 *Content-[00:10]\n"
+            "这里只讲背景和目标，不需要截图。\n"
+        )
+        state = VisualScreenshotState(markdown=markdown, video_path=pathlib.Path("video.mp4"), duration=120)
+
+        self._graph_runner_patch.stop()
+        self._graph_runner_patch_active = False
+        with patch.object(visual_agent_module, "run_visual_screenshot_graph", side_effect=RuntimeError("graph down")):
+            with self.assertRaisesRegex(RuntimeError, "graph down"):
+                agent.run(state)
+        self._graph_runner_patch.start()
+        self._graph_runner_patch_active = True
+
+        self.assertEqual(state.execution_engine, "langgraph")
+
+    def test_post_process_markdown_propagates_screenshot_errors(self):
+        generator = NoteGenerator.__new__(NoteGenerator)
+        audio_meta = type("_AudioMeta", (), {"duration": 120, "video_id": "BV1xx"})()
+
+        with patch.object(generator, "_insert_screenshots", side_effect=RuntimeError("graph failed")), \
+                patch.object(note_module.logger, "exception"):
+            with self.assertRaisesRegex(RuntimeError, "graph failed"):
+                generator._post_process_markdown(
+                    markdown="## Demo *Content-[00:10]\n",
+                    video_path=pathlib.Path("video.mp4"),
+                    formats=["screenshot"],
+                    audio_meta=audio_meta,
+                    platform="bilibili",
+                )
+
+    def test_post_process_markdown_fails_when_screenshot_requested_without_video(self):
+        generator = NoteGenerator.__new__(NoteGenerator)
+        audio_meta = type("_AudioMeta", (), {"duration": 120, "video_id": "BV1xx"})()
+
+        with self.assertRaisesRegex(RuntimeError, "没有可用的视频文件"):
+            generator._post_process_markdown(
+                markdown="## Demo *Content-[00:10]\n",
+                video_path=None,
+                formats=["screenshot"],
+                audio_meta=audio_meta,
+                platform="bilibili",
+            )
+
+    def test_summarize_text_updates_main_task_status_not_markdown_cache_status(self):
+        generator = NoteGenerator.__new__(NoteGenerator)
+        status_updates = []
+        generator._update_status = lambda task_id, status, message=None: status_updates.append(
+            (task_id, getattr(status, "value", status), message)
+        )
+        task_status = type(
+            "_TaskStatus",
+            (),
+            {"SUMMARIZING": type("_Status", (), {"value": "SUMMARIZING"})()},
+        )
+        gpt_source = type("_GPTSource", (), {"__init__": lambda self, **kwargs: None})
+
+        class _GPT:
+            def summarize(self, _source):
+                return "## Demo\n"
+
+        audio_meta = type(
+            "_AudioMeta",
+            (),
+            {"title": "demo", "raw_info": {"tags": []}},
+        )()
+        transcript = type("_Transcript", (), {"segments": []})()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            markdown_path = pathlib.Path(tmp_dir) / "task-1_markdown.md"
+            with patch.object(note_module, "TaskStatus", task_status), \
+                    patch.object(note_module, "GPTSource", gpt_source):
+                markdown = generator._summarize_text(
+                    audio_meta=audio_meta,
+                    transcript=transcript,
+                    gpt=_GPT(),
+                    markdown_cache_file=markdown_path,
+                    link=False,
+                    screenshot=False,
+                    formats=[],
+                    style=None,
+                    extras=None,
+                    video_img_urls=[],
+                )
+
+        self.assertEqual(markdown, "## Demo\n")
+        self.assertEqual(status_updates[0][0], "task-1")
+        self.assertNotEqual(status_updates[0][0], "task-1_markdown")
 
     def test_fallback_images_are_inserted_near_content_sections(self):
         generator = NoteGenerator.__new__(NoteGenerator)
@@ -482,9 +599,9 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             @staticmethod
             def _score_frame(path):
                 timestamp = int(pathlib.Path(path).stem.split("_")[-1])
-                if timestamp == 22:
+                if timestamp == 18:
                     return 0.96, 1000
-                if timestamp in {34, 45, 50}:
+                if timestamp in {34, 45, 49}:
                     return 0.84, 2000
                 return 0.25, timestamp
 
@@ -503,8 +620,8 @@ class TestNoteScreenshotFallback(unittest.TestCase):
                         return max(0, self.end - self.start)
 
                 return [
-                    _Segment(22, 22, by_ts[22], [by_ts[22]]),
-                    _Segment(34, 50, by_ts[45], [by_ts[34], by_ts[45], by_ts[50]]),
+                    _Segment(18, 18, by_ts[18], [by_ts[18]]),
+                    _Segment(34, 49, by_ts[45], [by_ts[34], by_ts[45], by_ts[49]]),
                 ]
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -542,9 +659,9 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             @staticmethod
             def _score_frame(path):
                 timestamp = int(pathlib.Path(path).stem.split("_")[-1])
-                if timestamp == 22:
+                if timestamp == 18:
                     return 0.90, 1000
-                if timestamp in {60, 90, 118}:
+                if timestamp in {60, 78, 112, 118}:
                     return 0.78, 2000
                 return 0.30, timestamp
 
@@ -564,8 +681,8 @@ class TestNoteScreenshotFallback(unittest.TestCase):
                         return max(0, self.end - self.start)
 
                 return [
-                    _Segment(22, 22, by_ts[22], [by_ts[22]]),
-                    _Segment(60, 118, by_ts[90], [by_ts[60], by_ts[90], by_ts[118]]),
+                    _Segment(18, 18, by_ts[18], [by_ts[18]]),
+                    _Segment(60, 118, by_ts[112], [by_ts[60], by_ts[78], by_ts[112], by_ts[118]]),
                 ]
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -589,7 +706,70 @@ class TestNoteScreenshotFallback(unittest.TestCase):
                 )
 
             self.assertIsNotNone(candidate)
-            self.assertEqual(candidate.timestamp, 90)
+            self.assertEqual(candidate.timestamp, 112)
+            self.assertEqual([path for path in created if path.exists()], [pathlib.Path(candidate.path)])
+
+    def test_best_screenshot_prefers_final_information_over_early_title_frame(self):
+        generator = NoteGenerator.__new__(NoteGenerator)
+
+        class _Reader:
+            @staticmethod
+            def _calculate_file_md5(path):
+                return pathlib.Path(path).name
+
+            @staticmethod
+            def _score_frame(path):
+                timestamp = int(pathlib.Path(path).stem.split("_")[-1])
+                if timestamp == 18:
+                    return 0.92, 1000
+                if timestamp in {60, 78, 112, 118}:
+                    return 0.74, 2000
+                return 0.32, timestamp
+
+            @staticmethod
+            def _build_visual_segments(candidates):
+                by_ts = {candidate.timestamp: candidate for candidate in candidates}
+
+                class _Segment:
+                    def __init__(self, start, end, representative, frames):
+                        self.start = start
+                        self.end = end
+                        self.representative = representative
+                        self.frames = frames
+
+                    @property
+                    def duration(self):
+                        return max(0, self.end - self.start)
+
+                return [
+                    _Segment(18, 18, by_ts[18], [by_ts[18]]),
+                    _Segment(60, 118, by_ts[112], [by_ts[60], by_ts[78], by_ts[112], by_ts[118]]),
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            created = []
+
+            def _generate(_video_path, _output_dir, timestamp, index):
+                path = pathlib.Path(tmp_dir) / f"shot_{index}_{timestamp}.jpg"
+                path.write_bytes(f"image-{timestamp}".encode())
+                created.append(path)
+                return str(path)
+
+            with patch.object(note_module, "IMAGE_OUTPUT_DIR", pathlib.Path(tmp_dir)), \
+                    patch.object(note_module, "generate_screenshot", side_effect=_generate):
+                candidate = generator._best_screenshot_near_timestamp(
+                    video_path=pathlib.Path("video.mp4"),
+                    timestamp=0,
+                    duration=160,
+                    index=0,
+                    visual_reader=_Reader(),
+                    search_end=120,
+	                    section_title="Plan-And-Execute Agent",
+	                    section_context="需要选择包含执行计划和最终信息的完整画面，而不是章节标题页。",
+	                )
+
+            self.assertIsNotNone(candidate)
+            self.assertEqual(candidate.timestamp, 112)
             self.assertEqual([path for path in created if path.exists()], [pathlib.Path(candidate.path)])
 
     def test_multimodal_reviewer_can_choose_better_candidate(self):
@@ -655,6 +835,256 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             chosen = generator._review_screenshot_candidates(candidates, _Gpt())
 
         self.assertIsNone(chosen)
+
+    def test_best_screenshot_uses_fast_heuristic_by_default_even_for_vision_model(self):
+        generator = NoteGenerator.__new__(NoteGenerator)
+
+        class _Reader:
+            @staticmethod
+            def _calculate_file_md5(path):
+                return pathlib.Path(path).name
+
+            @staticmethod
+            def _score_frame(_path):
+                return 0.9, 123
+
+        class _Gpt:
+            supports_vision = True
+            model = "qwen-vl"
+            client = object()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            def _generate(_video_path, _output_dir, timestamp, index):
+                path = pathlib.Path(tmp_dir) / f"shot_{index}_{timestamp}.jpg"
+                path.write_bytes(f"image-{timestamp}".encode())
+                return str(path)
+
+            with patch.dict(os.environ, {}, clear=False), \
+                    patch.object(note_module, "IMAGE_OUTPUT_DIR", pathlib.Path(tmp_dir)), \
+                    patch.object(note_module, "generate_screenshot", side_effect=_generate), \
+                    patch.object(
+                        visual_agent_module.VisualScreenshotAgent,
+                        "review_screenshot_candidates",
+                        side_effect=AssertionError("review should be disabled by default"),
+                    ):
+                os.environ.pop("SCREENSHOT_REVIEW_MODE", None)
+                candidate = generator._best_screenshot_near_timestamp(
+                    video_path=pathlib.Path("video.mp4"),
+                    timestamp=0,
+                    duration=60,
+                    index=0,
+                    visual_reader=_Reader(),
+                    gpt=_Gpt(),
+                )
+
+        self.assertIsNotNone(candidate)
+
+    def test_balanced_review_skips_clear_low_value_selection(self):
+        generator = NoteGenerator.__new__(NoteGenerator)
+
+        class _Reader:
+            @staticmethod
+            def _calculate_file_md5(path):
+                return pathlib.Path(path).name
+
+            @staticmethod
+            def _score_frame(path):
+                timestamp = int(pathlib.Path(path).stem.split("_")[-1])
+                return (0.92 if timestamp == 18 else 0.55), timestamp
+
+        class _Gpt:
+            supports_vision = True
+            model = "qwen-vl"
+            client = object()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            def _generate(_video_path, _output_dir, timestamp, index):
+                path = pathlib.Path(tmp_dir) / f"shot_{index}_{timestamp}.jpg"
+                path.write_bytes(f"image-{timestamp}".encode())
+                return str(path)
+
+            with patch.dict(os.environ, {"SCREENSHOT_REVIEW_MODE": "balanced"}, clear=False), \
+                    patch.object(note_module, "IMAGE_OUTPUT_DIR", pathlib.Path(tmp_dir)), \
+                    patch.object(note_module, "generate_screenshot", side_effect=_generate), \
+                    patch.object(
+                        visual_agent_module.VisualScreenshotAgent,
+                        "review_screenshot_candidates",
+                        side_effect=AssertionError("balanced mode should skip clear low-value selections"),
+                    ):
+                candidate = generator._best_screenshot_near_timestamp(
+                    video_path=pathlib.Path("video.mp4"),
+                    timestamp=0,
+                    duration=60,
+                    index=0,
+                    visual_reader=_Reader(),
+                    gpt=_Gpt(),
+                    section_title="Background",
+                    section_context="This paragraph explains definitions only.",
+                )
+
+        self.assertIsNotNone(candidate)
+
+    def test_balanced_review_uses_vision_for_important_ambiguous_selection(self):
+        generator = NoteGenerator.__new__(NoteGenerator)
+
+        class _Reader:
+            @staticmethod
+            def _calculate_file_md5(path):
+                return pathlib.Path(path).name
+
+            @staticmethod
+            def _score_frame(path):
+                timestamp = int(pathlib.Path(path).stem.split("_")[-1])
+                return (0.82 if timestamp < 40 else 0.78), timestamp
+
+        class _Gpt:
+            supports_vision = True
+            model = "qwen-vl"
+            client = object()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            review_calls = []
+
+            def _generate(_video_path, _output_dir, timestamp, index):
+                path = pathlib.Path(tmp_dir) / f"shot_{index}_{timestamp}.jpg"
+                path.write_bytes(f"image-{timestamp}".encode())
+                return str(path)
+
+            def _review(_self, candidates, *_args, **_kwargs):
+                review_calls.append(candidates)
+                return max(candidates, key=lambda item: item.timestamp)
+
+            with patch.dict(os.environ, {"SCREENSHOT_REVIEW_MODE": "balanced"}, clear=False), \
+                    patch.object(note_module, "IMAGE_OUTPUT_DIR", pathlib.Path(tmp_dir)), \
+                    patch.object(note_module, "generate_screenshot", side_effect=_generate), \
+                    patch.object(
+                        visual_agent_module.VisualScreenshotAgent,
+                        "review_screenshot_candidates",
+                        _review,
+                    ):
+                candidate = generator._best_screenshot_near_timestamp(
+                    video_path=pathlib.Path("video.mp4"),
+                    timestamp=0,
+                    duration=80,
+                    index=0,
+                    visual_reader=_Reader(),
+                    gpt=_Gpt(),
+                    section_title="Plan-And-Execute Agent",
+                    section_context="需要选择包含执行计划和最终结果的完整画面。",
+                )
+
+        self.assertEqual(len(review_calls), 1)
+        self.assertIsNotNone(candidate)
+        self.assertGreaterEqual(candidate.timestamp, 40)
+
+    def test_balanced_review_respects_vision_review_limit(self):
+        agent = visual_agent_module.VisualScreenshotAgent(image_output_dir=".", image_base_url="/static/screenshots")
+        agent._vision_review_count = 1
+
+        class _Gpt:
+            supports_vision = True
+            model = "qwen-vl"
+            client = object()
+
+        with patch.dict(os.environ, {"SCREENSHOT_VISION_REVIEW_LIMIT": "1"}, clear=False):
+            self.assertFalse(agent.can_use_vision_review("balanced", _Gpt()))
+
+    def test_balanced_review_counts_failed_review_attempt_against_limit(self):
+        class _Reader:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            @staticmethod
+            def _calculate_file_md5(path):
+                return pathlib.Path(path).name
+
+            @staticmethod
+            def _score_frame(path):
+                timestamp = int(pathlib.Path(path).stem.split("_")[-1])
+                return (0.82 if timestamp < 40 else 0.78), timestamp
+
+        class _Gpt:
+            supports_vision = True
+            model = "qwen-vl"
+            client = object()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            def _generate(_video_path, _output_dir, timestamp, index):
+                path = pathlib.Path(tmp_dir) / f"shot_{index}_{timestamp}.jpg"
+                path.write_bytes(f"image-{timestamp}".encode())
+                return str(path)
+
+            def _review(_self, *_args, **_kwargs):
+                return None
+
+            agent = visual_agent_module.VisualScreenshotAgent(
+                image_output_dir=tmp_dir,
+                image_base_url="/static/screenshots",
+                video_reader_cls=_Reader,
+                screenshot_func=_generate,
+            )
+            with patch.dict(os.environ, {"SCREENSHOT_REVIEW_MODE": "balanced"}, clear=False), \
+                    patch.object(
+                        visual_agent_module.VisualScreenshotAgent,
+                        "review_screenshot_candidates",
+                        _review,
+                    ):
+                agent.best_screenshot_near_timestamp(
+                    video_path=pathlib.Path("video.mp4"),
+                    timestamp=0,
+                    duration=80,
+                    index=0,
+                    visual_reader=agent.create_visual_reader(pathlib.Path("video.mp4")),
+                    gpt=_Gpt(),
+                    section_title="Plan-And-Execute Agent",
+                    section_context="需要选择包含执行计划和最终结果的完整画面。",
+                )
+
+        self.assertEqual(agent._vision_review_count, 1)
+
+    def test_best_screenshot_fails_when_strict_vision_reviewer_returns_no_result(self):
+        generator = NoteGenerator.__new__(NoteGenerator)
+
+        class _Reader:
+            @staticmethod
+            def _calculate_file_md5(path):
+                return pathlib.Path(path).name
+
+            @staticmethod
+            def _score_frame(_path):
+                return 0.9, 123
+
+        class _Gpt:
+            supports_vision = True
+            model = "qwen-vl"
+            client = object()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            created = []
+
+            def _generate(_video_path, _output_dir, timestamp, index):
+                path = pathlib.Path(tmp_dir) / f"shot_{index}_{timestamp}.jpg"
+                path.write_bytes(f"image-{timestamp}".encode())
+                created.append(path)
+                return str(path)
+
+            with patch.dict(os.environ, {"SCREENSHOT_REVIEW_MODE": "strict"}, clear=False), \
+                    patch.object(note_module, "IMAGE_OUTPUT_DIR", pathlib.Path(tmp_dir)), \
+                    patch.object(note_module, "generate_screenshot", side_effect=_generate), \
+                    patch.object(
+                        visual_agent_module.VisualScreenshotAgent,
+                        "review_screenshot_candidates",
+                        return_value=None,
+                    ):
+                with self.assertRaisesRegex(RuntimeError, "多模态截图评审未返回可用结果"):
+                    generator._best_screenshot_near_timestamp(
+                        video_path=pathlib.Path("video.mp4"),
+                        timestamp=0,
+                        duration=60,
+                        index=0,
+                        visual_reader=_Reader(),
+                        gpt=_Gpt(),
+                    )
 
     def test_best_screenshot_does_not_cross_before_section_start(self):
         generator = NoteGenerator.__new__(NoteGenerator)

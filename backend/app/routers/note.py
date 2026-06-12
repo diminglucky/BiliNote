@@ -3,6 +3,7 @@ import json
 import os
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -17,6 +18,7 @@ from app.enmus.note_enums import DownloadQuality
 from app.exceptions.note import NoteError
 from app.services.note import NoteGenerator, logger
 from app.services.task_serial_executor import task_serial_executor
+from app.services.visual_enhancement_service import VisualEnhancementService, note_to_json_payload
 from app.utils.response import ResponseWrapper as R
 from app.utils.url_parser import extract_video_id
 from app.validators.video_url_validator import is_supported_video_url
@@ -29,6 +31,9 @@ from app.enmus.task_status_enums import TaskStatus
 # from app.services.whisperer import transcribe_audio
 
 router = APIRouter()
+visual_enhancement_executor = ThreadPoolExecutor(
+    max_workers=int(os.getenv("VISUAL_ENHANCEMENT_MAX_WORKERS", "1"))
+)
 
 
 class RecordRequest(BaseModel):
@@ -92,10 +97,181 @@ def _load_json_file_safely(path: str, retries: int = 3, delay: float = 0.05):
     return None
 
 
-def save_note_to_file(task_id: str, note):
+def save_note_to_file(
+    task_id: str,
+    note,
+    enhance_token: Optional[str] = None,
+    generation_token: Optional[str] = None,
+):
     os.makedirs(NOTE_OUTPUT_DIR, exist_ok=True)
+    payload = note_to_json_payload(note)
+    if enhance_token:
+        payload["enhance_token"] = enhance_token
+    if generation_token:
+        payload["generation_token"] = generation_token
     with open(os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json"), "w", encoding="utf-8") as f:
-        json.dump(asdict(note), f, ensure_ascii=False, indent=2)
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def _status_path(task_id: str) -> str:
+    return os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.status.json")
+
+
+def _current_generation_token(task_id: str) -> Optional[str]:
+    path = _status_path(task_id)
+    if not os.path.exists(path):
+        return None
+    data = _load_json_file_safely(path, retries=1)
+    if not isinstance(data, dict):
+        return None
+    return data.get("generation_token")
+
+
+def _is_current_generation(task_id: str, generation_token: Optional[str]) -> bool:
+    if not generation_token:
+        return True
+    return _current_generation_token(task_id) == generation_token
+
+
+def _is_current_enhancement(
+    task_id: str,
+    enhance_token: Optional[str],
+    generation_token: Optional[str] = None,
+) -> bool:
+    if not enhance_token and not generation_token:
+        return True
+    result_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json")
+    if not os.path.exists(result_path):
+        return False
+    data = _load_json_file_safely(result_path, retries=1)
+    if not isinstance(data, dict):
+        return False
+    if enhance_token and data.get("enhance_token") != enhance_token:
+        return False
+    if generation_token and data.get("generation_token") != generation_token:
+        return False
+    return True
+
+
+def _update_enhancement_status_if_current(
+    task_id: str,
+    enhance_token: str,
+    generation_token: Optional[str],
+    status: TaskStatus,
+    message: str,
+) -> None:
+    if not _is_current_enhancement(task_id, enhance_token, generation_token):
+        logger.info("Skip stale visual enhancement status (task_id=%s)", task_id)
+        return
+    NoteGenerator(generation_token=generation_token)._update_status(task_id, status, message=message)
+
+
+def _recover_result_from_cache(task_id: str) -> bool:
+    result_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json")
+    status_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.status.json")
+    markdown_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}_markdown.md")
+    transcript_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}_transcript.json")
+    audio_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}_audio.json")
+    if os.path.exists(result_path):
+        return True
+    if not all(os.path.exists(path) for path in [markdown_path, transcript_path, audio_path]):
+        return False
+    if os.path.exists(status_path) and os.path.getmtime(status_path) >= os.path.getmtime(markdown_path):
+        return False
+
+    transcript = _load_json_file_safely(transcript_path, retries=1)
+    audio_meta = _load_json_file_safely(audio_path, retries=1)
+    if not isinstance(transcript, dict) or not isinstance(audio_meta, dict):
+        return False
+
+    try:
+        with open(markdown_path, "r", encoding="utf-8") as f:
+            markdown = f.read()
+        if not markdown.strip():
+            return False
+        with open(result_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "markdown": markdown,
+                    "transcript": transcript,
+                    "audio_meta": audio_meta,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+        NoteGenerator()._update_status(task_id, TaskStatus.SUCCESS, message="笔记已从缓存恢复")
+        logger.info("Recovered note result from cache (task_id=%s)", task_id)
+        return True
+    except Exception as exc:
+        logger.warning("恢复缓存结果失败 (task_id=%s): %s", task_id, exc)
+        return False
+
+
+def _submit_visual_enhancement(
+    task_id: str,
+    note,
+    platform: str,
+    enhance_token: str,
+    generation_token: Optional[str] = None,
+) -> None:
+    video_path = getattr(note.audio_meta, "video_path", None)
+    if not video_path:
+        logger.warning(f"跳过视觉增强：缺少 video_path (task_id={task_id})")
+        _update_enhancement_status_if_current(
+            task_id,
+            enhance_token,
+            generation_token,
+            TaskStatus.SUCCESS,
+            "笔记已生成，但缺少视频文件，无法补充截图",
+        )
+        return
+    if not Path(video_path).exists():
+        logger.warning(f"跳过视觉增强：视频文件不存在 (task_id={task_id}, video_path={video_path})")
+        _update_enhancement_status_if_current(
+            task_id,
+            enhance_token,
+            generation_token,
+            TaskStatus.SUCCESS,
+            "笔记已生成，但视频文件不存在，无法补充截图",
+        )
+        return
+
+    try:
+        future = visual_enhancement_executor.submit(
+            VisualEnhancementService().enhance_saved_note,
+            task_id,
+            video_path,
+            note.audio_meta.duration,
+            platform,
+            enhance_token,
+            generation_token,
+        )
+    except Exception as exc:
+        logger.exception("提交视觉增强任务失败 (task_id=%s)", task_id)
+        _update_enhancement_status_if_current(
+            task_id,
+            enhance_token,
+            generation_token,
+            TaskStatus.SUCCESS,
+            f"笔记已生成，截图增强提交失败：{exc}",
+        )
+        return
+
+    def _on_done(done_future):
+        try:
+            done_future.result()
+        except Exception as exc:
+            logger.exception("视觉增强任务异常退出 (task_id=%s)", task_id)
+            _update_enhancement_status_if_current(
+                task_id,
+                enhance_token,
+                generation_token,
+                TaskStatus.SUCCESS,
+                f"笔记已生成，截图增强异常：{exc}",
+            )
+
+    future.add_done_callback(_on_done)
 
 
 def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
@@ -135,14 +311,14 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
 def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
                   link: bool = False, screenshot: bool = False, model_name: str = None, provider_id: str = None,
                   _format: list = None, style: str = None, extras: str = None, video_understanding: bool = False,
-                  video_interval=0, grid_size=[]
+                  video_interval=0, grid_size=[], generation_token: Optional[str] = None
                   ):
 
     if not model_name or not provider_id:
         raise HTTPException(status_code=400, detail="请选择模型和提供者")
 
     def _execute_note_task():
-        return NoteGenerator().generate(
+        return NoteGenerator(generation_token=generation_token).generate(
             video_url=video_url,
             platform=platform,
             quality=quality,
@@ -157,20 +333,43 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
             video_understanding=video_understanding,
             video_interval=video_interval,
             grid_size=grid_size,
+            defer_screenshots=True,
         )
 
     logger.info(f"任务进入执行队列 (task_id={task_id})")
     note = task_serial_executor.run(_execute_note_task)
     logger.info(f"Note generated: {task_id}")
+    if not _is_current_generation(task_id, generation_token):
+        logger.info("Skip stale note result (task_id=%s)", task_id)
+        return
     if not note or not note.markdown:
         logger.warning(f"任务 {task_id} 执行失败，跳过保存")
         return
-    save_note_to_file(task_id, note)
+    wants_screenshot = bool(screenshot or ("screenshot" in (_format or [])))
+    enhance_token = str(uuid.uuid4()) if wants_screenshot else None
+    if not _is_current_generation(task_id, generation_token):
+        logger.info("Skip stale note save (task_id=%s)", task_id)
+        return
+    save_note_to_file(task_id, note, enhance_token=enhance_token, generation_token=generation_token)
+    if not _is_current_generation(task_id, generation_token):
+        logger.info("Skip stale note completion (task_id=%s)", task_id)
+        return
+    status_writer = NoteGenerator(generation_token=generation_token)
+    if wants_screenshot:
+        status_writer._update_status(
+            task_id,
+            TaskStatus.ENHANCING,
+            message="基础笔记已生成，正在根据内容异步补充关键截图",
+        )
+        _submit_visual_enhancement(task_id, note, platform, enhance_token, generation_token)
+    else:
+        status_writer._update_status(task_id, TaskStatus.SUCCESS, message="笔记已生成")
 
     # 自动建立向量索引（用于 AI 问答），失败不影响笔记生成
     try:
         from app.services.vector_store import VectorStoreManager
-        VectorStoreManager().index_task(task_id)
+        if _is_current_generation(task_id, generation_token):
+            VectorStoreManager().index_task(task_id)
     except Exception as e:
         logger.warning(f"向量索引失败（不影响笔记）: {e}")
 
@@ -236,8 +435,10 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
             # 正常新建任务
             task_id = str(uuid.uuid4())
 
-        # 统一先写入 PENDING，表示已进入队列等待串行执行
-        NoteGenerator()._update_status(task_id, TaskStatus.PENDING)
+        generation_token = str(uuid.uuid4())
+
+        # 统一先写入 PENDING，表示已进入队列等待执行
+        NoteGenerator(generation_token=generation_token)._update_status(task_id, TaskStatus.PENDING)
 
         # 客户端已经抓好字幕的话，写到转写缓存文件，NoteGenerator 的 cache-hit 逻辑会直接用上
         if data.prefetched_transcript:
@@ -248,7 +449,8 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
 
         background_tasks.add_task(run_note_task, task_id, data.video_url, data.platform, data.quality, data.link,
                                   data.screenshot, data.model_name, data.provider_id, data.format, data.style,
-                                  data.extras, data.video_understanding, data.video_interval, data.grid_size)
+                                  data.extras, data.video_understanding, data.video_interval, data.grid_size,
+                                  generation_token)
         return R.success({"task_id": task_id})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -258,8 +460,9 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
 def get_task_status(task_id: str):
     status_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.status.json")
     result_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json")
+    _recover_result_from_cache(task_id)
 
-    def _success_response(message: str = ""):
+    def _success_response(message: str = "", status_value: str = TaskStatus.SUCCESS.value):
         result_content = _load_json_file_safely(result_path)
         if result_content is None:
             return R.success({
@@ -268,7 +471,7 @@ def get_task_status(task_id: str):
                 "task_id": task_id
             })
         return R.success({
-            "status": TaskStatus.SUCCESS.value,
+            "status": status_value,
             "result": result_content,
             "message": message,
             "task_id": task_id
@@ -298,6 +501,9 @@ def get_task_status(task_id: str):
                     "message": "任务完成，但结果文件未找到",
                     "task_id": task_id
                 })
+
+        if status == TaskStatus.ENHANCING.value and os.path.exists(result_path):
+            return _success_response(message, TaskStatus.ENHANCING.value)
 
         if status == TaskStatus.FAILED.value:
             failed_response = R.success({

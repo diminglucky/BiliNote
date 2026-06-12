@@ -108,6 +108,10 @@ def _make_gpt():
     return UniversalGPT(_DummyClient(), model="deepseek-chat")
 
 
+def _make_vision_gpt():
+    return UniversalGPT(_DummyClient(), model="qwen-vl", supports_vision=True)
+
+
 class TestCreateMessagesContentFormat(unittest.TestCase):
     """覆盖 create_messages 在不同 video_img_urls 输入下的输出形态。"""
 
@@ -120,7 +124,18 @@ class TestCreateMessagesContentFormat(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["role"], "user")
         self.assertIsInstance(messages[0]["content"], str)
-        self.assertEqual(messages[0]["content"], "PROMPT_BODY")
+
+    def test_text_model_with_images_still_emits_string_content(self):
+        gpt = _make_gpt()
+
+        messages = gpt.create_messages(
+            segments=[],
+            video_img_urls=["https://example.com/a.jpg", "https://example.com/b.jpg"],
+        )
+
+        self.assertIsInstance(messages[0]["content"], str)
+        self.assertTrue(messages[0]["content"].startswith("PROMPT_BODY"))
+        self.assertIn("Note quality requirements", messages[0]["content"])
 
     def test_empty_image_list_emits_string_content(self):
         """显式传入空列表也要走纯文本分支，避免图片字段误触发。"""
@@ -132,8 +147,7 @@ class TestCreateMessagesContentFormat(unittest.TestCase):
 
     def test_with_images_emits_multimodal_array(self):
         """有图片时保留多模态 array 形态，确保多模态模型功能不退化。"""
-        gpt = _make_gpt()
-
+        gpt = _make_vision_gpt()
         messages = gpt.create_messages(
             segments=[],
             video_img_urls=["https://example.com/a.jpg", "https://example.com/b.jpg"],
@@ -142,10 +156,12 @@ class TestCreateMessagesContentFormat(unittest.TestCase):
         content = messages[0]["content"]
         self.assertIsInstance(content, list)
         self.assertEqual(len(content), 3)  # 1 text + 2 images
-        self.assertEqual(content[0], {"type": "text", "text": "PROMPT_BODY"})
+        self.assertEqual(content[0]["type"], "text")
+        self.assertTrue(content[0]["text"].startswith("PROMPT_BODY"))
+        self.assertIn("Note quality requirements", content[0]["text"])
         self.assertEqual(content[1]["type"], "image_url")
         self.assertEqual(content[1]["image_url"]["url"], "https://example.com/a.jpg")
-        self.assertEqual(content[1]["image_url"]["detail"], "auto")
+        self.assertEqual(content[1]["image_url"]["detail"], "high")
         self.assertEqual(content[2]["image_url"]["url"], "https://example.com/b.jpg")
 
     def test_no_image_url_field_when_no_images(self):

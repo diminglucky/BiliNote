@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -10,11 +11,56 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple, Type
 
 from app.gpt.base import GPT
+from app.services.visual_screenshot_graph import run_visual_screenshot_graph
 from app.utils.screenshot_marker import extract_screenshot_timestamps
 from app.utils.video_helper import generate_screenshot
 from app.utils.video_reader import FrameCandidate, VideoReader
 
 logger = logging.getLogger(__name__)
+
+
+def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+    return max(minimum, min(maximum, value))
+
+
+def screenshot_review_mode() -> str:
+    """Controls optional multimodal review for screenshot candidates.
+
+    off: use the fast local visual heuristic only.
+    balanced: only review high-value or ambiguous selections.
+    strict: require the vision model to pick a candidate.
+    assist: ask the vision model, but keep the local heuristic if review fails.
+    """
+    mode = os.getenv("SCREENSHOT_REVIEW_MODE", "off").strip().lower()
+    if mode in {"1", "true", "yes", "on", "enabled", "strict"}:
+        return "strict"
+    if mode in {"balanced", "smart", "auto"}:
+        return "balanced"
+    if mode in {"assist", "assisted", "optional"}:
+        return "assist"
+    return "off"
+
+
+def screenshot_plan_budget(duration: Optional[float]) -> int:
+    override = os.getenv("SCREENSHOT_PLAN_LIMIT")
+    if override:
+        return _env_int("SCREENSHOT_PLAN_LIMIT", 8, 1, 40)
+
+    if not duration or duration <= 0:
+        return 6
+
+    minutes = float(duration) / 60
+    if minutes <= 10:
+        return 5
+    if minutes <= 30:
+        return 8
+    if minutes <= 60:
+        return 12
+    return min(24, 12 + math.ceil((minutes - 60) / 20))
 
 
 @dataclass
@@ -36,7 +82,11 @@ class VisualScreenshotState:
     matches: Optional[List[Tuple[str, int]]] = None
     visual_plans: Optional[List[VisualSectionPlan]] = None
     generated_images: Optional[List[Tuple[int, str]]] = None
+    generated_image_paths: Optional[List[str]] = None
+    published_image_paths: Optional[List[str]] = None
     diagnostics: Optional[List[str]] = None
+    execution_engine: str = "local"
+    on_markdown_update: Optional[Callable[[str, int, str], None]] = None
 
 
 class VisualScreenshotAgent:
@@ -53,6 +103,7 @@ class VisualScreenshotAgent:
         self.image_base_url = image_base_url
         self.video_reader_cls = video_reader_cls
         self.screenshot_func = screenshot_func
+        self._vision_review_count = 0
 
     def insert_screenshots(
         self,
@@ -60,16 +111,27 @@ class VisualScreenshotAgent:
         video_path: Path,
         duration: Optional[float] = None,
         gpt: Optional[GPT] = None,
+        on_markdown_update: Optional[Callable[[str, int, str], None]] = None,
     ) -> str | None:
         state = self.run(VisualScreenshotState(
             markdown=markdown,
             video_path=video_path,
             duration=duration,
             gpt=gpt,
+            on_markdown_update=on_markdown_update,
         ))
         return state.markdown
 
     def run(self, state: VisualScreenshotState) -> VisualScreenshotState:
+        state.execution_engine = "langgraph"
+        try:
+            return run_visual_screenshot_graph(self, state)
+        except Exception:
+            self.cleanup_generated_artifacts(state)
+            raise
+
+    def run_nodes_inline(self, state: VisualScreenshotState) -> VisualScreenshotState:
+        state.execution_engine = "local"
         state = self.prepare_state(state)
         state = self.filter_marker_node(state)
         state = self.compose_images_node(state)
@@ -81,6 +143,8 @@ class VisualScreenshotAgent:
         state.matches = extract_screenshot_timestamps(state.markdown)
         state.visual_plans = self.plan_visual_screenshots(state.markdown, state.duration)
         state.generated_images = []
+        state.generated_image_paths = []
+        state.published_image_paths = []
         return state
 
     def filter_marker_node(self, state: VisualScreenshotState) -> VisualScreenshotState:
@@ -118,7 +182,6 @@ class VisualScreenshotAgent:
         if fallback_images:
             if state.generated_images is not None:
                 state.generated_images.extend(fallback_images)
-            state.markdown = self.insert_fallback_images_near_sections(state.markdown, fallback_images)
         return state
 
     def create_visual_reader(self, video_path: Path) -> VideoReader:
@@ -147,21 +210,29 @@ class VisualScreenshotAgent:
                     gpt=state.gpt,
                     section_title=plan.title,
                     section_context=self.section_context_for_plan(state.markdown, plan),
+                    generated_image_paths=state.generated_image_paths,
                 )
                 if candidate is None:
-                    continue
+                    raise RuntimeError(f"未找到可用截图候选: {plan.start}")
                 if any(visual_reader._is_same_visual_state(prev, candidate) for prev in inserted_visuals):
                     Path(candidate.path).unlink(missing_ok=True)
                     continue
                 inserted_visuals.append(candidate)
-                fallback_images.append((plan.start, f"![]({self.image_url(candidate.path)})"))
+                image_markdown = f"![]({self.image_url(candidate.path)})"
+                fallback_images.append((plan.start, image_markdown))
+                state.markdown = self.insert_fallback_images_near_sections(
+                    state.markdown,
+                    [(plan.start, image_markdown)],
+                )
+                if self.publish_incremental_update(state, plan.start, image_markdown):
+                    self.mark_published_image(state, candidate.path)
             except Exception as exc:
                 self.add_diagnostic(state, f"fallback_failed:{plan.start}:{exc}")
                 logger.error(f"兜底截图失败 (timestamp={plan.start})：{exc}")
+                raise
         if fallback_images:
             if state.generated_images is not None:
                 state.generated_images.extend(fallback_images)
-            return self.insert_fallback_images_near_sections(state.markdown, fallback_images)
         return state.markdown
 
     def marker_images_node(
@@ -186,25 +257,52 @@ class VisualScreenshotAgent:
                     gpt=state.gpt,
                     section_title=plan.title if plan else "",
                     section_context=self.section_context_for_plan(state.markdown, plan) if plan else "",
+                    generated_image_paths=state.generated_image_paths,
                 )
                 if candidate is None:
-                    state.markdown = state.markdown.replace(marker, "", 1)
-                    continue
+                    raise RuntimeError(f"未找到可用截图候选: {ts}")
                 if not Path(candidate.path).exists():
                     logger.error(f"生成截图失败 (timestamp={ts})：文件未生成")
-                    continue
+                    raise FileNotFoundError(candidate.path)
                 if any(visual_reader._is_same_visual_state(prev, candidate) for prev in inserted_visuals):
                     Path(candidate.path).unlink(missing_ok=True)
                     state.markdown = state.markdown.replace(marker, "", 1)
                     continue
                 inserted_visuals.append(candidate)
                 img_url = self.image_url(candidate.path)
-                state.markdown = state.markdown.replace(marker, f"![]({img_url})", 1)
-                generated_images.append((candidate.timestamp, f"![]({img_url})"))
+                image_markdown = f"![]({img_url})"
+                state.markdown = state.markdown.replace(marker, image_markdown, 1)
+                generated_images.append((candidate.timestamp, image_markdown))
+                if self.publish_incremental_update(state, candidate.timestamp, image_markdown):
+                    self.mark_published_image(state, candidate.path)
             except Exception as exc:
                 self.add_diagnostic(state, f"marker_failed:{ts}:{exc}")
                 logger.error(f"生成截图失败 (timestamp={ts})：{exc}")
+                raise
         return generated_images
+
+    @staticmethod
+    def publish_incremental_update(
+        state: VisualScreenshotState,
+        timestamp: int,
+        image_markdown: str,
+    ) -> bool:
+        if not state.on_markdown_update:
+            return False
+        try:
+            state.on_markdown_update(state.markdown, timestamp, image_markdown)
+            return True
+        except Exception as exc:
+            logger.warning("增量写回截图失败 (timestamp=%s): %s", timestamp, exc)
+            return False
+
+    @staticmethod
+    def mark_published_image(state: VisualScreenshotState, image_path: str) -> None:
+        if not state.on_markdown_update:
+            return
+        if state.published_image_paths is None:
+            state.published_image_paths = []
+        state.published_image_paths.append(image_path)
 
     def supplement_missing_plan_images_node(
         self,
@@ -222,6 +320,11 @@ class VisualScreenshotAgent:
             if max(0, plan.start - 45) <= image_ts <= plan.end + 15
         }
         missing_plans = [plan for plan in visual_plans if plan.start not in covered_times]
+        supplement_limit = _env_int("SCREENSHOT_SUPPLEMENT_LIMIT", 4, 0, 20)
+        if supplement_limit == 0:
+            return []
+        missing_plans = sorted(missing_plans, key=lambda item: (-item.score, item.start))[:supplement_limit]
+        missing_plans.sort(key=lambda item: item.start)
         fallback_images: List[Tuple[int, str]] = []
         if missing_plans:
             for offset, plan in enumerate(missing_plans):
@@ -236,18 +339,38 @@ class VisualScreenshotAgent:
                         gpt=state.gpt,
                         section_title=plan.title,
                         section_context=self.section_context_for_plan(state.markdown, plan),
+                        generated_image_paths=state.generated_image_paths,
                     )
                     if candidate is None:
-                        continue
+                        raise RuntimeError(f"未找到可用截图候选: {plan.start}")
                     if any(visual_reader._is_same_visual_state(prev, candidate) for prev in inserted_visuals):
                         Path(candidate.path).unlink(missing_ok=True)
                         continue
                     inserted_visuals.append(candidate)
-                    fallback_images.append((candidate.timestamp, f"![]({self.image_url(candidate.path)})"))
+                    image_markdown = f"![]({self.image_url(candidate.path)})"
+                    fallback_images.append((candidate.timestamp, image_markdown))
+                    state.markdown = self.insert_fallback_images_near_sections(
+                        state.markdown,
+                        [(candidate.timestamp, image_markdown)],
+                    )
+                    if self.publish_incremental_update(state, candidate.timestamp, image_markdown):
+                        self.mark_published_image(state, candidate.path)
                 except Exception as exc:
                     self.add_diagnostic(state, f"supplement_failed:{plan.start}:{exc}")
                     logger.error(f"补充截图失败 (timestamp={plan.start})：{exc}")
+                    raise
         return fallback_images
+
+    @staticmethod
+    def cleanup_generated_artifacts(state: VisualScreenshotState) -> None:
+        published = set(state.published_image_paths or [])
+        for image_path in state.generated_image_paths or []:
+            if image_path in published:
+                continue
+            try:
+                Path(image_path).unlink(missing_ok=True)
+            except Exception as exc:
+                logger.warning("清理截图文件失败 (%s): %s", image_path, exc)
 
     @staticmethod
     def add_diagnostic(state: VisualScreenshotState, message: str) -> None:
@@ -318,7 +441,10 @@ class VisualScreenshotAgent:
         if client is None or not model:
             return None
 
-        max_candidates = min(8, len(candidates))
+        max_candidates = min(
+            _env_int("SCREENSHOT_REVIEW_CANDIDATE_LIMIT", 4, 2, 8),
+            len(candidates),
+        )
         if len(candidates) <= max_candidates:
             review_candidates = sorted(candidates, key=lambda item: item.timestamp)
         else:
@@ -342,8 +468,9 @@ class VisualScreenshotAgent:
             "选择标准按优先级排序：\n"
             "1. 与当前章节标题和正文最相关。\n"
             "2. 信息完整，优先包含最终结果、更新后的计划、运行结果、完整流程图或关键代码。\n"
-            "3. 避免空白页、过渡动画、刚开始出现的半成品画面、重复画面、无关字幕特写。\n"
-            "4. 如果后面的截图只是更空或已经切到无关内容，不要为了靠后而选择它。\n"
+            "3. 如果候选图都相关，优先选择讲解稳定停留后的完整画面，而不是章节标题页或刚出现的半成品。\n"
+            "4. 避免空白页、过渡动画、只包含标题/概念名的封面、执行到一半的计划、重复画面、无关字幕特写。\n"
+            "5. 如果后面的截图只是更空或已经切到无关内容，不要为了靠后而选择它。\n"
             "只返回 JSON，不要输出解释文字。格式："
             "{\"selected\":候选序号整数,\"reason\":\"简短中文原因\",\"confidence\":0到1}\n\n"
             f"章节标题：{section_title or '未知'}\n"
@@ -364,7 +491,7 @@ class VisualScreenshotAgent:
                     "type": "image_url",
                     "image_url": {
                         "url": self.image_data_url(candidate.path),
-                        "detail": "high",
+                        "detail": os.getenv("SCREENSHOT_REVIEW_IMAGE_DETAIL", "low"),
                     },
                 })
             except Exception as exc:
@@ -391,13 +518,13 @@ class VisualScreenshotAgent:
                     messages=[{"role": "user", "content": content}],
                 )
         except Exception as exc:
-            logger.warning(f"多模态截图评审失败，使用启发式结果: {exc}")
+            logger.warning(f"多模态截图评审失败，未使用评审结果: {exc}")
             return None
 
         raw = response.choices[0].message.content
         data = self.extract_json_object(raw)
         if not isinstance(data, dict):
-            logger.warning(f"多模态截图评审返回非 JSON，使用启发式结果: {raw}")
+            logger.warning(f"多模态截图评审返回非 JSON，未使用评审结果: {raw}")
             return None
 
         try:
@@ -421,6 +548,51 @@ class VisualScreenshotAgent:
             confidence_value,
         )
         return chosen
+
+    @staticmethod
+    def needs_balanced_review(
+        segments,
+        heuristic_best: FrameCandidate,
+        section_title: str = "",
+        section_context: str = "",
+    ) -> bool:
+        if not segments:
+            return False
+        text = f"{section_title}\n{section_context}"
+        value_score, reasons = VisualScreenshotAgent.visual_keyword_score(text)
+        important_section = value_score >= 3.2 or any(
+            keyword in text
+            for keyword in ["最终结果", "执行计划", "架构", "流程", "工作流", "结果", "Plan", "Execute", "Agent"]
+        )
+        if important_section and len(segments) >= 2:
+            return True
+
+        ranked = sorted(
+            [segment.representative for segment in segments],
+            key=lambda item: item.score,
+            reverse=True,
+        )
+        if len(ranked) < 2:
+            return False
+        score_gap = ranked[0].score - ranked[1].score
+        best_is_not_raw_top = ranked[0].path != heuristic_best.path
+        ambiguous = score_gap <= float(os.getenv("SCREENSHOT_BALANCED_REVIEW_SCORE_GAP", "0.12"))
+        return ambiguous or best_is_not_raw_top
+
+    def can_use_vision_review(self, review_mode: str, gpt: Optional[GPT]) -> bool:
+        if review_mode == "off":
+            return False
+        if not (
+            gpt
+            and getattr(gpt, "supports_vision", False)
+            and getattr(gpt, "client", None)
+            and getattr(gpt, "model", None)
+        ):
+            return False
+        if review_mode == "balanced":
+            limit = _env_int("SCREENSHOT_VISION_REVIEW_LIMIT", 3, 0, 20)
+            return self._vision_review_count < limit
+        return True
 
     @staticmethod
     def format_seconds(seconds: int) -> str:
@@ -569,6 +741,7 @@ class VisualScreenshotAgent:
             (1.8, ["界面", "页面", "屏幕", "窗口", "控制台", "终端", "IDE", "编辑器", "运行结果"]),
             (1.6, ["代码", "公式", "命令", "配置", "参数", "报错", "日志"]),
             (1.4, ["实操", "演示", "操作", "步骤", "案例", "示例", "实验"]),
+            (1.4, ["Agent", "Plan", "Re-Plan", "Execute", "执行计划", "最终结果", "主程序", "工作流", "状态图"]),
             (1.2, ["图中", "这张图", "这个表", "这张表", "这个流程", "这段代码", "如下图"]),
             (1.2, ["diagram", "table", "chart", "architecture", "flow", "ui", "screen", "code", "formula", "demo"]),
         ]
@@ -619,6 +792,27 @@ class VisualScreenshotAgent:
                 candidate = later
             selected.append(candidate)
         return selected or [ordered[0]]
+
+    @staticmethod
+    def select_candidate_offsets(offsets: List[int], max_candidates: int) -> List[int]:
+        ordered = sorted(set(max(0, offset) for offset in offsets))
+        if len(ordered) <= max_candidates:
+            return ordered
+
+        selected = {ordered[0], ordered[-1]}
+        for preferred in (22, 34, 45, 50, 60, 90):
+            if preferred in ordered and len(selected) < max_candidates:
+                selected.add(preferred)
+
+        remaining_slots = max_candidates - len(selected)
+        if remaining_slots > 0:
+            interior = [offset for offset in ordered[1:-1] if offset not in selected]
+            for idx in range(remaining_slots):
+                if not interior:
+                    break
+                source_idx = round(idx * (len(interior) - 1) / max(1, remaining_slots - 1))
+                selected.add(interior[source_idx])
+        return sorted(selected)
 
     def plan_visual_screenshots(
         self,
@@ -704,10 +898,13 @@ class VisualScreenshotAgent:
 
         filtered: List[VisualSectionPlan] = []
         min_gap = 45
+        plan_limit = screenshot_plan_budget(duration)
         for plan in sorted(plans, key=lambda item: (-item.score, item.start)):
             if any(abs(plan.start - kept.start) < min_gap for kept in filtered):
                 continue
             filtered.append(plan)
+            if len(filtered) >= plan_limit:
+                break
 
         filtered.sort(key=lambda item: item.start)
         logger.info(
@@ -728,27 +925,29 @@ class VisualScreenshotAgent:
         gpt: Optional[GPT] = None,
         section_title: str = "",
         section_context: str = "",
+        generated_image_paths: Optional[List[str]] = None,
     ) -> Optional[FrameCandidate]:
         total_duration = int(duration or 0)
-        offsets = [0, 4, 8, 14, 22, 34, 50]
+        max_candidates = _env_int("SCREENSHOT_CANDIDATE_LIMIT", 10, 5, 16)
+        offsets = [0, 6, 12, 18, 26, 34, 45, 60]
         if search_end and search_end > timestamp:
             span = search_end - timestamp
-            sampled_span = min(span, 120)
+            sampled_span = min(span, 150)
             offsets.extend([
                 max(0, int(sampled_span * ratio))
-                for ratio in (0.25, 0.5, 0.75)
+                for ratio in (0.45, 0.65, 0.82, 0.94)
             ])
             offsets.append(max(0, min(span - 2, sampled_span)))
         else:
             remaining = max(0, total_duration - timestamp - 1) if total_duration else 90
-            sampled_span = min(remaining, 90)
+            sampled_span = min(remaining, 120)
             offsets.extend([
                 max(0, int(sampled_span * ratio))
-                for ratio in (0.65, 0.9)
+                for ratio in (0.5, 0.72, 0.9)
             ])
         candidates: List[FrameCandidate] = []
         seen_ts = set()
-        for offset_idx, offset in enumerate(sorted(set(offsets))):
+        for offset_idx, offset in enumerate(self.select_candidate_offsets(offsets, max_candidates)):
             ts = timestamp + offset
             if total_duration:
                 ts = max(1, min(total_duration - 1, ts))
@@ -760,6 +959,8 @@ class VisualScreenshotAgent:
             img_path = self.screenshot_func(str(video_path), str(self.image_output_dir), ts, index * 10 + offset_idx)
             if not Path(img_path).exists():
                 continue
+            if generated_image_paths is not None:
+                generated_image_paths.append(img_path)
             exact_hash = visual_reader._calculate_file_md5(img_path)
             score, perceptual_hash = visual_reader._score_frame(img_path)
             candidates.append(FrameCandidate(
@@ -771,7 +972,7 @@ class VisualScreenshotAgent:
             ))
 
         if not candidates:
-            return None
+            raise RuntimeError(f"未生成可用截图候选: {timestamp}")
 
         build_segments = getattr(visual_reader, "_build_visual_segments", None)
         if build_segments:
@@ -788,7 +989,7 @@ class VisualScreenshotAgent:
                 for candidate in candidates
             ]
         if not segments:
-            return None
+            raise RuntimeError(f"未生成可用视觉分段: {timestamp}")
 
         first_ts = min(segment.start for segment in segments)
         last_ts = max(segment.end for segment in segments)
@@ -797,29 +998,61 @@ class VisualScreenshotAgent:
         def selection_score(segment) -> float:
             candidate = segment.representative
             later_ratio = 0.0 if last_ts <= first_ts else (segment.end - first_ts) / (last_ts - first_ts)
-            stable_bonus = min(len(segment.frames) - 1, 4) * 0.07 + min(segment.duration / 30, 1) * 0.12
-            singleton_penalty = 0.22 if len(segment.frames) == 1 and len(segments) > 1 else 0.0
+            stable_bonus = min(len(segment.frames) - 1, 5) * 0.08 + min(segment.duration / 24, 1) * 0.16
+            singleton_penalty = 0.24 if len(segment.frames) == 1 and len(segments) > 1 else 0.0
+            early_penalty = 0.16 if later_ratio < 0.2 and len(segments) > 1 else 0.0
             completeness_bonus = 0.0
-            if candidate.score >= max(0.34, best_raw_score - 0.22):
-                completeness_bonus += later_ratio * 0.24
+            if candidate.score >= max(0.34, best_raw_score - 0.30):
+                completeness_bonus += later_ratio * 0.38
                 if len(segment.frames) > 1 and later_ratio >= 0.45:
-                    completeness_bonus += 0.12
-            return candidate.score + stable_bonus + completeness_bonus - singleton_penalty
+                    completeness_bonus += 0.18
+                if later_ratio >= 0.72:
+                    completeness_bonus += 0.10
+            raw_score_gap_penalty = max(0.0, best_raw_score - candidate.score - 0.26) * 0.65
+            return (
+                candidate.score
+                + stable_bonus
+                + completeness_bonus
+                - singleton_penalty
+                - early_penalty
+                - raw_score_gap_penalty
+            )
 
         heuristic_best = max(segments, key=selection_score).representative
-        reviewed_best = self.review_screenshot_candidates(
-            candidates,
-            gpt,
-            section_title=section_title,
-            section_context=section_context,
+        review_mode = screenshot_review_mode()
+        has_vision_reviewer = False
+        reviewed_best = None
+        should_review = review_mode in {"assist", "strict"} or (
+            review_mode == "balanced"
+            and self.needs_balanced_review(
+                segments,
+                heuristic_best,
+                section_title=section_title,
+                section_context=section_context,
+            )
         )
+        if should_review:
+            has_vision_reviewer = self.can_use_vision_review(review_mode, gpt)
+            if has_vision_reviewer:
+                if review_mode == "balanced":
+                    self._vision_review_count += 1
+                reviewed_best = self.review_screenshot_candidates(
+                    candidates,
+                    gpt,
+                    section_title=section_title,
+                    section_context=section_context,
+                )
+        if review_mode == "strict" and not has_vision_reviewer:
+            raise RuntimeError("多模态截图评审不可用")
+        if review_mode == "strict" and has_vision_reviewer and reviewed_best is None:
+            raise RuntimeError("多模态截图评审未返回可用结果")
         best = reviewed_best or heuristic_best
         for candidate in candidates:
             if candidate.path != best.path:
                 Path(candidate.path).unlink(missing_ok=True)
         if best.score < 0.34:
             Path(best.path).unlink(missing_ok=True)
-            return None
+            raise RuntimeError(f"截图候选质量过低: {best.score:.3f}")
         return best
 
     @staticmethod
@@ -849,18 +1082,10 @@ class VisualScreenshotAgent:
                 timestamps = reader.extract_representative_timestamps()
                 if timestamps:
                     return timestamps
+                raise RuntimeError("视觉扫描未返回可用截图时间点")
         except Exception as exc:
-            logger.warning(f"视觉截图兜底失败，改用均匀时间点: {exc}")
-
-        return self.fallback_uniform_timestamps(duration)
-
-    @staticmethod
-    def fallback_uniform_timestamps(duration: Optional[float]) -> List[int]:
-        if not duration or duration <= 0:
-            return [20, 60, 120]
-        total = int(duration)
-        candidates = [int(total * 0.2), int(total * 0.5), int(total * 0.8)]
-        return sorted({max(1, min(total - 1, t)) for t in candidates})
+            logger.exception("视觉截图时间点提取失败")
+            raise RuntimeError("视觉截图时间点提取失败") from exc
 
     @staticmethod
     def extract_screenshot_timestamps(markdown: str) -> List[Tuple[str, int]]:

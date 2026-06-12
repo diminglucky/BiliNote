@@ -8,6 +8,7 @@ class TaskStatus(str, enum.Enum):
     TRANSCRIBING = "TRANSCRIBING"
     SUMMARIZING = "SUMMARIZING"
     FORMATTING = "FORMATTING"
+    ENHANCING = "ENHANCING"
     SAVING = "SAVING"
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
@@ -21,6 +22,7 @@ class TaskStatus(str, enum.Enum):
             cls.TRANSCRIBING: "转录中",
             cls.SUMMARIZING: "总结中",
             cls.FORMATTING: "格式化中",
+            cls.ENHANCING: "增强截图中",
             cls.SAVING: "保存中",
             cls.SUCCESS: "完成",
             cls.FAILED: "失败",

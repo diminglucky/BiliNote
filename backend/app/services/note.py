@@ -4,7 +4,7 @@ import os
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
-from typing import List, Optional, Tuple, Union, Any
+from typing import Callable, List, Optional, Tuple, Union, Any
 
 from fastapi import HTTPException
 from pydantic import HttpUrl
@@ -70,13 +70,14 @@ class NoteGenerator:
     以及将任务信息写入状态文件与数据库等功能。
     """
 
-    def __init__(self):
+    def __init__(self, generation_token: Optional[str] = None):
         from app.services.transcriber_config_manager import TranscriberConfigManager
         config_manager = TranscriberConfigManager()
         self.model_size: str = config_manager.get_whisper_model_size()
         self.device: Optional[str] = None
         self.transcriber_type: str = config_manager.get_transcriber_type()
         self.transcriber: Transcriber = self._init_transcriber()
+        self.generation_token = generation_token
         self.video_path: Optional[Path] = None
         self.video_img_urls=[]
         logger.info("NoteGenerator 初始化完成")
@@ -101,6 +102,7 @@ class NoteGenerator:
         video_understanding: bool = False,
         video_interval: int = 0,
         grid_size: Optional[List[int]] = None,
+        defer_screenshots: bool = False,
     ) -> NoteResult | None:
         """
         主流程：按步骤依次下载、转写、GPT 总结、截图/链接处理、存库、返回 NoteResult。
@@ -124,6 +126,8 @@ class NoteGenerator:
         """
         if grid_size is None:
             grid_size = []
+        formats = _format or []
+        wants_screenshot = screenshot or "screenshot" in formats
 
         try:
             logger.info(f"开始生成笔记 (task_id={task_id})")
@@ -177,7 +181,7 @@ class NoteGenerator:
             # 2. 下载音频/视频
             # 有字幕时只提取元信息，不下载音视频文件（除非需要截图/视频理解）
             has_transcript = transcript is not None
-            need_full_download = not has_transcript or screenshot or video_understanding
+            need_full_download = not has_transcript or wants_screenshot or video_understanding
             audio_meta = self._download_media(
                 downloader=downloader,
                 video_url=video_url,
@@ -186,7 +190,7 @@ class NoteGenerator:
                 status_phase=TaskStatus.DOWNLOADING,
                 platform=platform,
                 output_path=output_path,
-                screenshot=screenshot,
+                screenshot=wants_screenshot,
                 video_understanding=video_understanding,
                 video_interval=video_interval,
                 grid_size=grid_size,
@@ -215,32 +219,40 @@ class NoteGenerator:
                 gpt=gpt,
                 markdown_cache_file=markdown_cache_file,
                 link=link,
-                screenshot=screenshot,
-                formats=_format or [],
+                screenshot=wants_screenshot,
+                formats=formats,
                 style=style,
                 extras=extras,
                 video_img_urls=self.video_img_urls,
             )
 
             # 4. 截图 & 链接替换
-            if _format:
+            post_process_formats = formats
+            if defer_screenshots and "screenshot" in post_process_formats:
+                post_process_formats = [item for item in post_process_formats if item != "screenshot"]
+
+            if post_process_formats:
+                self._update_status(task_id, TaskStatus.FORMATTING, message="正在筛选关键截图和整理笔记")
                 markdown = self._post_process_markdown(
                     markdown=markdown,
                     video_path=self.video_path,
-                    formats=_format,
+                    formats=post_process_formats,
                     audio_meta=audio_meta,
                     platform=platform,
                     gpt=gpt,
                 )
 
             markdown = prepend_source_link(markdown, str(video_url))
+            if self.video_path and not getattr(audio_meta, "video_path", None):
+                audio_meta.video_path = str(self.video_path)
 
             # 5. 保存记录到数据库
             self._update_status(task_id, TaskStatus.SAVING)
             self._save_metadata(video_id=audio_meta.video_id, platform=platform, task_id=task_id)
 
             # 6. 完成
-            self._update_status(task_id, TaskStatus.SUCCESS)
+            if not defer_screenshots:
+                self._update_status(task_id, TaskStatus.SUCCESS)
             logger.info(f"笔记生成成功 (task_id={task_id})")
             return NoteResult(markdown=markdown, transcript=transcript, audio_meta=audio_meta)
 
@@ -334,8 +346,19 @@ class NoteGenerator:
 
         NOTE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         status_file = NOTE_OUTPUT_DIR / f"{task_id}.status.json"
+        if self.generation_token and status_file.exists():
+            try:
+                existing = json.loads(status_file.read_text(encoding="utf-8"))
+                existing_token = existing.get("generation_token")
+                if existing_token and existing_token != self.generation_token:
+                    logger.info("Skip stale status update (task_id=%s)", task_id)
+                    return
+            except Exception:
+                pass
         print(f"写入状态文件: {status_file} 当前状态: {status}")
         data = {"status": status.value if isinstance(status, TaskStatus) else status}
+        if self.generation_token:
+            data["generation_token"] = self.generation_token
         if message:
             data["message"] = message
 
@@ -629,7 +652,7 @@ class NoteGenerator:
         :param extras: GPT 额外参数
         :return: 生成的 Markdown 字符串
         """
-        task_id = markdown_cache_file.stem
+        task_id = markdown_cache_file.stem.removesuffix("_markdown")
         self._update_status(task_id, TaskStatus.SUMMARIZING)
 
         source = GPTSource(
@@ -663,6 +686,7 @@ class NoteGenerator:
         audio_meta: AudioDownloadResult,
         platform: str,
         gpt: Optional[GPT] = None,
+        on_markdown_update: Optional[Callable[[str, int, str], None]] = None,
     ) -> str:
         """
         对生成的 Markdown 做后期处理：插入截图和/或插入链接。
@@ -674,13 +698,23 @@ class NoteGenerator:
         :param platform: 平台标识，用于链接替换
         :return: 处理后的 Markdown 字符串
         """
+        if "screenshot" in formats and not video_path:
+            raise RuntimeError("截图已启用，但没有可用的视频文件")
+
         if "screenshot" in formats and video_path:
             try:
-                updated = self._insert_screenshots(markdown, video_path, audio_meta.duration, gpt=gpt)
+                updated = self._insert_screenshots(
+                    markdown,
+                    video_path,
+                    audio_meta.duration,
+                    gpt=gpt,
+                    on_markdown_update=on_markdown_update,
+                )
                 if updated is not None:
                     markdown = updated
             except Exception as exc:
-                logger.warning("截图插入失败，跳过该步骤")
+                logger.exception("截图插入失败")
+                raise
 
         if "link" in formats:
             try:
@@ -704,8 +738,15 @@ class NoteGenerator:
         video_path: Path,
         duration: Optional[float] = None,
         gpt: Optional[GPT] = None,
+        on_markdown_update: Optional[Callable[[str, int, str], None]] = None,
     ) -> str | None | Any:
-        return self._visual_screenshot_agent().insert_screenshots(markdown, video_path, duration, gpt)
+        return self._visual_screenshot_agent().insert_screenshots(
+            markdown,
+            video_path,
+            duration,
+            gpt,
+            on_markdown_update=on_markdown_update,
+        )
 
     @staticmethod
     def _matching_visual_plan(timestamp: int, plans: List[VisualSectionPlan]) -> Optional[VisualSectionPlan]:
@@ -821,10 +862,6 @@ class NoteGenerator:
 
     def _fallback_screenshot_timestamps(self, video_path: Path, duration: Optional[float]) -> List[int]:
         return self._visual_screenshot_agent().fallback_screenshot_timestamps(video_path, duration)
-
-    @staticmethod
-    def _fallback_uniform_timestamps(duration: Optional[float]) -> List[int]:
-        return VisualScreenshotAgent.fallback_uniform_timestamps(duration)
 
     @staticmethod
     def _extract_screenshot_timestamps(markdown: str) -> List[Tuple[str, int]]:
