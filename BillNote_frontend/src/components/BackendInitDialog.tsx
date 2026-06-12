@@ -64,12 +64,12 @@ function BackendInitDialog({ open, failed = false, lastError = null, onRetry }: 
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-red-600">
               <AlertTriangle className="w-5 h-5" />
-              后端启动失败
+              {isTauri ? '后端启动失败' : '未连接到后端'}
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-3 mt-2 text-sm">
             <p className="text-muted-foreground">
-              {lastError || '后端在预计时间内未就绪。'}
+              {lastError || (isTauri ? '后端在预计时间内未就绪。' : '浏览器开发模式不会自动启动后端。')}
             </p>
             {stderrPreview.length > 0 && (
               <div className="space-y-1">
@@ -83,12 +83,24 @@ function BackendInitDialog({ open, failed = false, lastError = null, onRetry }: 
               </div>
             )}
             <div className="text-xs text-muted-foreground space-y-1">
-              <p>常见原因：</p>
-              <ul className="list-disc list-inside space-y-0.5 pl-1">
-                <li>安装路径含中文 / 空格（PyInstaller 在这种路径下经常起不来）</li>
-                <li>没装 ffmpeg / 端口 8483 被占用</li>
-                <li>首次启动时 whisper 模型下载未完成</li>
-              </ul>
+              {isTauri ? (
+                <>
+                  <p>常见原因：</p>
+                  <ul className="list-disc list-inside space-y-0.5 pl-1">
+                    <li>安装路径含中文 / 空格（PyInstaller 在这种路径下经常起不来）</li>
+                    <li>没装 ffmpeg / 端口 8483 被占用</li>
+                    <li>首次启动时 whisper 模型下载未完成</li>
+                  </ul>
+                </>
+              ) : (
+                <>
+                  <p>当前是浏览器开发模式，请先启动后端：</p>
+                  <pre className="mt-1 overflow-auto rounded bg-zinc-900 px-2 py-1.5 font-mono text-[11px] leading-snug text-zinc-100">
+                    cd D:\code\play\BiliNote\backend{'\n'}
+                    D:\software\anaconda\envs\play\python.exe main.py
+                  </pre>
+                </>
+              )}
             </div>
             <div className="flex flex-wrap gap-2 pt-2">
               <Button
@@ -116,7 +128,7 @@ function BackendInitDialog({ open, failed = false, lastError = null, onRetry }: 
               )}
             </div>
             <p className="text-xs text-muted-foreground pt-2">
-              仍然无法解决？复制日志去&nbsp;
+              {isTauri ? '仍然无法解决？复制日志去 ' : '后端启动后点击“重试”；仍然无法解决可去 '}
               <a
                 href="https://github.com/JefferyHcool/BiliNote/issues"
                 target="_blank"

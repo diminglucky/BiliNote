@@ -13,16 +13,17 @@ import toast from 'react-hot-toast'
 
 interface ModelSelectorProps {
   providerId: string
+  onModelSaved?: () => void | Promise<void>
 }
 
-export function ModelSelector({ providerId }: ModelSelectorProps) {
+export function ModelSelector({ providerId, onModelSaved }: ModelSelectorProps) {
   const { models, loading, selectedModel, loadModels, setSelectedModel, addNewModel } =
     useModelStore()
   const [search, setSearch] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
   const filteredModels = models.filter(model => {
-    const keywords = search.trim().toLowerCase().split(/\s+/)
+    const keywords = search.trim().toLowerCase().split(/\s+/).filter(Boolean)
     const target = model.id.toLowerCase()
     return keywords.every(kw => target.includes(kw))
   })
@@ -31,7 +32,7 @@ export function ModelSelector({ providerId }: ModelSelectorProps) {
     if (providerId) {
       loadModels(providerId)
     }
-  }, [providerId])
+  }, [providerId, loadModels])
 
   const handleSubmit = async () => {
     if (!selectedModel) {
@@ -41,7 +42,8 @@ export function ModelSelector({ providerId }: ModelSelectorProps) {
     try {
       setSubmitting(true)
       await addNewModel(providerId, selectedModel)
-      toast.success('保存模型成功 🎉')
+      await onModelSaved?.()
+      toast.success('保存模型成功')
     } catch (error) {
       toast.error('保存失败')
     } finally {

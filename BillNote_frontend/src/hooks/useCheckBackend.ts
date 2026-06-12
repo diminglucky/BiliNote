@@ -112,7 +112,11 @@ export const useCheckBackend = (): BackendCheck => {
 
     // 总超时兜底
     timeoutId = setTimeout(() => {
-      markFailed(`后端 ${TOTAL_TIMEOUT_MS / 1000}s 内未就绪，请检查后端日志或重启`)
+      markFailed(
+        isTauri
+          ? `后端 ${TOTAL_TIMEOUT_MS / 1000}s 内未就绪，请检查后端日志或重启`
+          : `未检测到后端服务，请先在本地启动 backend/main.py（端口 8483）`,
+      )
     }, TOTAL_TIMEOUT_MS)
 
     // 桌面端订阅 Tauri 事件（动态 import 避免 web 端打包报错）

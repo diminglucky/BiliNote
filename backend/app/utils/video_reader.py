@@ -2,16 +2,20 @@ import base64
 import hashlib
 import os
 import re
+import shutil
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import ffmpeg
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageStat
 
 from app.utils.logger import get_logger
 from app.utils.path_helper import get_app_dir
 
 logger = get_logger(__name__)
+_RUN_LOCKS: dict[str, threading.Lock] = {}
+_RUN_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass
@@ -20,6 +24,27 @@ class VideoGridImage:
     start: float
     end: float
     label: str
+
+
+@dataclass
+class FrameCandidate:
+    path: str
+    timestamp: int
+    score: float
+    exact_hash: str
+    perceptual_hash: int | None = None
+
+
+@dataclass
+class VisualSegment:
+    start: int
+    end: int
+    representative: FrameCandidate
+    frames: list[FrameCandidate]
+
+    @property
+    def duration(self) -> int:
+        return max(0, self.end - self.start)
 
 
 class VideoReader:
@@ -32,6 +57,7 @@ class VideoReader:
                  unit_height=540,
                  save_quality=90,
                  font_path="fonts/arial.ttf",
+                 max_grid_images=None,
                  frame_dir=None,
                  grid_dir=None):
         self.video_path = video_path
@@ -41,10 +67,28 @@ class VideoReader:
         self.unit_width = unit_width
         self.unit_height = unit_height
         self.save_quality = save_quality
-        self.frame_dir = frame_dir or get_app_dir("output_frames")
-        self.grid_dir = grid_dir or get_app_dir("grid_output")
-        print(f"视频路径：{video_path}",self.frame_dir,self.grid_dir)
+        self.max_grid_images = max(1, int(max_grid_images)) if max_grid_images else None
+        run_key = self._safe_run_key(video_path)
+        self.frame_dir = frame_dir or get_app_dir(os.path.join("output_frames", run_key))
+        self.grid_dir = grid_dir or get_app_dir(os.path.join("grid_output", run_key))
+        logger.info(f"Video path: {video_path}, frame_dir={self.frame_dir}, grid_dir={self.grid_dir}")
         self.font_path = font_path
+
+    @staticmethod
+    def _safe_run_key(video_path: str) -> str:
+        stem = os.path.splitext(os.path.basename(video_path))[0] or "video"
+        safe_stem = re.sub(r"[^0-9A-Za-z_-]+", "_", stem).strip("_") or "video"
+        digest = hashlib.md5(os.path.abspath(video_path).encode("utf-8")).hexdigest()[:8]
+        return f"{safe_stem}_{digest}"
+
+    def _run_lock(self) -> threading.Lock:
+        key = f"{os.path.abspath(self.frame_dir)}::{os.path.abspath(self.grid_dir)}"
+        with _RUN_LOCKS_GUARD:
+            lock = _RUN_LOCKS.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                _RUN_LOCKS[key] = lock
+            return lock
 
     @staticmethod
     def _calculate_file_md5(file_path: str) -> str:
@@ -53,6 +97,83 @@ class VideoReader:
             for chunk in iter(lambda: f.read(8192), b""):
                 hasher.update(chunk)
         return hasher.hexdigest()
+
+    @staticmethod
+    def _hamming_distance(left: int | None, right: int | None) -> int:
+        if left is None or right is None:
+            return 64
+        return (left ^ right).bit_count()
+
+    @staticmethod
+    def _perceptual_hash(gray: Image.Image) -> int:
+        thumb = gray.resize((8, 8), Image.Resampling.LANCZOS)
+        pixels = list(thumb.getdata())
+        average = sum(pixels) / len(pixels)
+        value = 0
+        for idx, pixel in enumerate(pixels):
+            if pixel >= average:
+                value |= 1 << idx
+        return value
+
+    def _score_frame(self, file_path: str) -> tuple[float, int | None]:
+        """Score a frame by visual usefulness: avoid blank, blurry, low-detail frames."""
+        try:
+            with Image.open(file_path) as img:
+                rgb = img.convert("RGB").resize((160, 90), Image.Resampling.LANCZOS)
+                gray = rgb.convert("L")
+                hsv = rgb.convert("HSV")
+                stats = ImageStat.Stat(gray)
+                brightness = stats.mean[0]
+                contrast = stats.stddev[0]
+                entropy = gray.entropy()
+                edges = gray.filter(ImageFilter.FIND_EDGES)
+                edge_strength = ImageStat.Stat(edges).mean[0]
+                edge_pixels = sum(1 for value in edges.getdata() if value > 28)
+                edge_ratio = edge_pixels / max(1, gray.width * gray.height)
+                saturation = hsv.getchannel("S")
+                value = hsv.getchannel("V")
+                saturation_data = list(saturation.getdata())
+                value_data = list(value.getdata())
+                pixel_count = max(1, len(value_data))
+                colorful_ratio = sum(
+                    1 for sat, val in zip(saturation_data, value_data)
+                    if sat > 46 and val > 55
+                ) / pixel_count
+                bright_foreground_ratio = sum(
+                    1 for sat, val in zip(saturation_data, value_data)
+                    if sat < 90 and val > 185
+                ) / pixel_count
+                dark_foreground_ratio = sum(1 for val in value_data if val < 45) / pixel_count
+                perceptual_hash = self._perceptual_hash(gray)
+        except Exception:
+            # Damaged/test frames still pass through exact-hash dedupe instead of
+            # being dropped wholesale.
+            return 0.5, None
+
+        brightness_score = 1 - min(abs(brightness - 120) / 120, 1)
+        contrast_score = min(contrast / 50, 1)
+        entropy_score = min(entropy / 6, 1)
+        edge_score = min(edge_strength / 18, 1)
+        edge_coverage_score = min(edge_ratio / 0.18, 1)
+        foreground_signal = colorful_ratio + bright_foreground_ratio + min(dark_foreground_ratio, 0.25)
+        foreground_score = min(foreground_signal / 0.18, 1)
+        color_score = min(colorful_ratio / 0.18, 1)
+        score = (
+            brightness_score * 0.05
+            + contrast_score * 0.12
+            + entropy_score * 0.14
+            + edge_score * 0.14
+            + edge_coverage_score * 0.15
+            + foreground_score * 0.28
+            + color_score * 0.12
+        )
+        if foreground_signal < 0.08:
+            score *= foreground_signal / 0.08
+        if contrast < 10 and colorful_ratio < 0.03:
+            score *= 0.25
+        if edge_ratio < 0.025 and foreground_signal < 0.12:
+            score *= 0.55
+        return score, perceptual_hash
 
     def format_time(self, seconds: float) -> str:
         total = int(seconds)
@@ -75,7 +196,7 @@ class VideoReader:
         return float('inf')
 
     def _extract_single_frame(self, ts: int) -> str | None:
-        """提取单帧，返回输出路径或 None（失败时）。"""
+        """Extract one frame and return its output path, or None on failure."""
         time_label = self.format_time(ts)
         output_path = os.path.join(self.frame_dir, f"frame_{time_label}.jpg")
         cmd = ["ffmpeg", "-ss", str(ts), "-i", self.video_path, "-frames:v", "1", "-q:v", "2", "-y", output_path,
@@ -86,14 +207,113 @@ class VideoReader:
         except subprocess.CalledProcessError:
             return None
 
-    def extract_frames(self, max_frames=1000) -> list[str]:
+    def _candidate_timestamps(self, duration: float, max_frames: int | None = None) -> list[int]:
+        interval = max(1, int(self.frame_interval))
+        total = max(0, int(duration))
+        window_starts = list(range(0, total, interval))
+        if not window_starts or (max_frames is not None and max_frames <= 0):
+            return []
+
+        if max_frames is not None and len(window_starts) > max_frames:
+            step = len(window_starts) / max_frames
+            selected_indices = sorted({min(int(i * step), len(window_starts) - 1) for i in range(max_frames)})
+            window_starts = [window_starts[i] for i in selected_indices]
+
+        offsets = sorted({0, interval // 3, (interval * 2) // 3})
+        timestamps = []
+        for start in window_starts:
+            for offset in offsets:
+                ts = start + offset
+                if ts < total:
+                    timestamps.append(ts)
+        return sorted(set(timestamps))
+
+    def _select_useful_frames(self, candidates: list[FrameCandidate], max_frames: int | None = None) -> list[str]:
+        segments = self._build_visual_segments(candidates)
+
+        selected: list[FrameCandidate] = []
+        selected_paths = set()
+        last_exact_hash = None
+        min_useful_score = 0.35
+
+        for segment in segments:
+            chosen = segment.representative
+            if chosen.score < min_useful_score:
+                continue
+            if self.dedupe_enabled and chosen.exact_hash == last_exact_hash:
+                continue
+
+            selected.append(chosen)
+            selected_paths.add(chosen.path)
+            last_exact_hash = chosen.exact_hash
+            if max_frames is not None and len(selected) >= max_frames:
+                break
+
+        for item in candidates:
+            if item.path not in selected_paths and os.path.exists(item.path):
+                os.remove(item.path)
+        return [item.path for item in selected]
+
+    def _is_same_visual_state(self, left: FrameCandidate, right: FrameCandidate) -> bool:
+        if left.exact_hash == right.exact_hash:
+            return True
+        distance = self._hamming_distance(left.perceptual_hash, right.perceptual_hash)
+        if distance < 3:
+            return True
+        return False
+
+    def _build_visual_segments(self, candidates: list[FrameCandidate]) -> list[VisualSegment]:
+        ordered = sorted(candidates, key=lambda item: item.timestamp)
+        if not ordered:
+            return []
+
+        segments: list[list[FrameCandidate]] = []
+        current = [ordered[0]]
+        anchor = ordered[0]
+        for item in ordered[1:]:
+            if self.dedupe_enabled and self._is_same_visual_state(anchor, item):
+                current.append(item)
+                if item.score > anchor.score:
+                    anchor = item
+            else:
+                segments.append(current)
+                current = [item]
+                anchor = item
+        segments.append(current)
+
+        visual_segments = []
+        for frames in segments:
+            representative = max(frames, key=lambda item: item.score)
+            visual_segments.append(VisualSegment(
+                start=frames[0].timestamp,
+                end=frames[-1].timestamp,
+                representative=representative,
+                frames=frames,
+            ))
+        return visual_segments
+
+    def extract_representative_timestamps(self, max_frames: int | None = None) -> list[int]:
+        image_paths = self.extract_frames(max_frames=max_frames)
+        timestamps = {
+            int(ts)
+            for ts in (
+                self.extract_time_from_filename(os.path.basename(path))
+                for path in image_paths
+            )
+            if ts != float("inf")
+        }
+        return sorted(timestamps)
+
+    def extract_frames(self, max_frames: int | None = None) -> list[str]:
 
         try:
             os.makedirs(self.frame_dir, exist_ok=True)
             duration = float(ffmpeg.probe(self.video_path)["format"]["duration"])
-            timestamps = [i for i in range(0, int(duration), self.frame_interval)][:max_frames]
+            timestamps = self._candidate_timestamps(duration, max_frames)
+            if not timestamps:
+                return []
 
-            # 并行提取帧
+            # 骞惰鎻愬彇甯?
             max_workers = min(os.cpu_count() or 4, 8, len(timestamps))
             frame_results: dict[int, str | None] = {}
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -102,26 +322,26 @@ class VideoReader:
                     ts = futures[future]
                     frame_results[ts] = future.result()
 
-            # 按时间戳顺序整理结果，并进行去重
-            image_paths = []
-            last_hash = None
+            # 鎸夋椂闂存埑椤哄簭鏁寸悊缁撴灉锛屽苟杩涜鍘婚噸
+            candidates = []
             for ts in timestamps:
                 output_path = frame_results.get(ts)
                 if not output_path or not os.path.exists(output_path):
                     continue
 
-                if self.dedupe_enabled:
-                    frame_hash = self._calculate_file_md5(output_path)
-                    if frame_hash == last_hash:
-                        os.remove(output_path)
-                        continue
-                    last_hash = frame_hash
-
-                image_paths.append(output_path)
-            return image_paths
+                exact_hash = self._calculate_file_md5(output_path)
+                score, perceptual_hash = self._score_frame(output_path)
+                candidates.append(FrameCandidate(
+                    path=output_path,
+                    timestamp=ts,
+                    score=score,
+                    exact_hash=exact_hash,
+                    perceptual_hash=perceptual_hash,
+                ))
+            return self._select_useful_frames(candidates, max_frames)
         except Exception as e:
-            logger.error(f"分割帧发生错误：{str(e)}")
-            raise ValueError("视频处理失败")
+            logger.error(f"Failed to extract video frames: {e}")
+            raise ValueError("Video processing failed")
 
     def group_images(self) -> list[list[str]]:
         image_files = [os.path.join(self.frame_dir, f) for f in os.listdir(self.frame_dir) if
@@ -176,33 +396,35 @@ class VideoReader:
         return base64_images
 
     def run(self)->list[dict]:
-        logger.info("开始提取视频帧...")
+        logger.info("Starting video frame extraction...")
         try:
-            # 确保目录存在
-            os.makedirs(self.frame_dir, exist_ok=True)
-            os.makedirs(self.grid_dir, exist_ok=True)
-            #清空帧文件夹
-            for file in os.listdir(self.frame_dir):
-                if file.startswith("frame_"):
-                    os.remove(os.path.join(self.frame_dir, file))
-            #清空网格文件夹
-            for file in os.listdir(self.grid_dir):
-                if file.startswith("grid_"):
-                    os.remove(os.path.join(self.grid_dir, file))
-            self.extract_frames()
-            logger.info("开始拼接网格图...")
-            image_paths = []
-            self._grid_sources = {}
-            groups = self.group_images()
-            for idx, group in enumerate(groups, start=1):
-                out_path = self.concat_images(group, f"grid_{idx}")
-                self._grid_sources[out_path] = group
-                image_paths.append(out_path)
+            with self._run_lock():
+            # 纭繚鐩綍瀛樺湪
+                os.makedirs(self.frame_dir, exist_ok=True)
+                os.makedirs(self.grid_dir, exist_ok=True)
+            #娓呯┖甯ф枃浠跺す
+                shutil.rmtree(self.frame_dir, ignore_errors=True)
+                os.makedirs(self.frame_dir, exist_ok=True)
+            #娓呯┖缃戞牸鏂囦欢澶?
+                shutil.rmtree(self.grid_dir, ignore_errors=True)
+                os.makedirs(self.grid_dir, exist_ok=True)
+                max_selected_frames = None
+                if self.max_grid_images is not None:
+                    max_selected_frames = self.grid_size[0] * self.grid_size[1] * self.max_grid_images
+                self.extract_frames(max_frames=max_selected_frames)
+                logger.info("Starting grid image generation...")
+                image_paths = []
+                self._grid_sources = {}
+                groups = self.group_images()
+                for idx, group in enumerate(groups, start=1):
+                    out_path = self.concat_images(group, f"grid_{idx}")
+                    self._grid_sources[out_path] = group
+                    image_paths.append(out_path)
 
-            logger.info("📤 开始编码图像...")
-            images = self.encode_images_to_base64(image_paths)
-            return [image.__dict__ for image in images]
+                logger.info("Encoding grid images...")
+                images = self.encode_images_to_base64(image_paths)
+                return [image.__dict__ for image in images]
         except Exception as e:
-            logger.error(f"发生错误：{str(e)}")
-            raise ValueError("视频处理失败")
+            logger.error(f"Video reader failed: {e}")
+            raise ValueError("Video processing failed")
 

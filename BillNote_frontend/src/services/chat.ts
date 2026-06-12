@@ -26,7 +26,7 @@ export interface ChatStatusResponse {
 }
 
 export const indexTask = async (taskId: string): Promise<void> => {
-  return await request.post('/chat/index', { task_id: taskId })
+  return await request.post('/chat/index', { task_id: taskId }, { suppressToast: true })
 }
 
 export const askQuestion = async (data: {
@@ -40,5 +40,5 @@ export const askQuestion = async (data: {
 }
 
 export const getChatStatus = async (taskId: string): Promise<ChatStatusResponse> => {
-  return await request.get(`/chat/status?task_id=${taskId}`)
+  return await request.get(`/chat/status?task_id=${taskId}`, { suppressToast: true })
 }

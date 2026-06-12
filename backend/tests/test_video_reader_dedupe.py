@@ -3,6 +3,8 @@ import pathlib
 import re
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from unittest.mock import patch
@@ -38,7 +40,9 @@ def _install_stubs():
     pil_mod = types.ModuleType("PIL")
     pil_image_mod = types.ModuleType("PIL.Image")
     pil_draw_mod = types.ModuleType("PIL.ImageDraw")
+    pil_filter_mod = types.ModuleType("PIL.ImageFilter")
     pil_font_mod = types.ModuleType("PIL.ImageFont")
+    pil_stat_mod = types.ModuleType("PIL.ImageStat")
 
     class _FakeImage:
         pass
@@ -59,7 +63,9 @@ def _install_stubs():
 
     pil_image_mod.Image = _FakeImage
     pil_draw_mod.ImageDraw = _FakeImageDraw
+    pil_filter_mod.FIND_EDGES = object()
     pil_font_mod.ImageFont = _FakeImageFont
+    pil_stat_mod.ImageStat = object
 
     def _get_app_dir(name):
         return name
@@ -72,7 +78,9 @@ def _install_stubs():
     sys.modules["PIL"] = pil_mod
     sys.modules["PIL.Image"] = pil_image_mod
     sys.modules["PIL.ImageDraw"] = pil_draw_mod
+    sys.modules["PIL.ImageFilter"] = pil_filter_mod
     sys.modules["PIL.ImageFont"] = pil_font_mod
+    sys.modules["PIL.ImageStat"] = pil_stat_mod
     sys.modules["ffmpeg"] = ffmpeg_mod
     sys.modules["app.utils.logger"] = logger_mod
     sys.modules["app.utils.path_helper"] = path_helper_mod
@@ -131,11 +139,153 @@ class TestVideoReaderDeduplicateFrames(unittest.TestCase):
             }
 
             with patch.object(video_reader_module.ffmpeg, "probe", return_value={"format": {"duration": "4"}}), \
-                    patch.object(video_reader_module.subprocess, "run", side_effect=_make_fake_ffmpeg_runner(fake_colors)):
+                    patch.object(video_reader_module.subprocess, "run", side_effect=_make_fake_ffmpeg_runner(fake_colors)), \
+                    patch.object(reader, "_score_frame", side_effect=lambda _path: (0.5, None)):
                 paths = reader.extract_frames(max_frames=10)
 
             names = [pathlib.Path(p).name for p in paths]
             self.assertEqual(names, ["frame_00_00.jpg", "frame_00_02.jpg"])
+
+    def test_extract_frames_picks_highest_scored_candidate_per_window(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            frame_dir = pathlib.Path(tmp_dir) / "frames"
+            grid_dir = pathlib.Path(tmp_dir) / "grids"
+            reader = VideoReader(
+                video_path="dummy.mp4",
+                frame_interval=6,
+                frame_dir=str(frame_dir),
+                grid_dir=str(grid_dir),
+            )
+
+            fake_colors = {
+                0: b"dark",
+                2: b"useful-a",
+                4: b"blur",
+                6: b"blank",
+                8: b"useful-b",
+                10: b"bad",
+            }
+            scores = {
+                "frame_00_00.jpg": (0.1, 1),
+                "frame_00_02.jpg": (0.9, 2),
+                "frame_00_04.jpg": (0.2, 3),
+                "frame_00_06.jpg": (0.1, 4),
+                "frame_00_08.jpg": (0.8, 12),
+                "frame_00_10.jpg": (0.3, 13),
+            }
+
+            def _score(path):
+                return scores[pathlib.Path(path).name]
+
+            with patch.object(video_reader_module.ffmpeg, "probe", return_value={"format": {"duration": "12"}}), \
+                    patch.object(video_reader_module.subprocess, "run", side_effect=_make_fake_ffmpeg_runner(fake_colors)), \
+                    patch.object(reader, "_score_frame", side_effect=_score):
+                paths = reader.extract_frames(max_frames=10)
+
+            names = [pathlib.Path(p).name for p in paths]
+            self.assertEqual(names, ["frame_00_02.jpg", "frame_00_08.jpg"])
+
+    def test_candidate_timestamps_are_limited_and_spread_across_video(self):
+        reader = VideoReader(
+            video_path="dummy.mp4",
+            frame_interval=6,
+        )
+
+        timestamps = reader._candidate_timestamps(duration=120, max_frames=4)
+
+        self.assertEqual(len(timestamps), 12)
+        self.assertEqual(timestamps[:3], [0, 2, 4])
+        self.assertEqual(timestamps[-3:], [90, 92, 94])
+
+    def test_candidate_timestamps_are_unlimited_by_default(self):
+        reader = VideoReader(
+            video_path="dummy.mp4",
+            frame_interval=6,
+        )
+
+        timestamps = reader._candidate_timestamps(duration=18)
+
+        self.assertEqual(timestamps, [0, 2, 4, 6, 8, 10, 12, 14, 16])
+
+    def test_select_useful_frames_drops_low_value_windows(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            paths = []
+            for second in [0, 6, 12]:
+                path = pathlib.Path(tmp_dir) / f"frame_00_{second:02d}.jpg"
+                path.write_bytes(f"frame-{second}".encode())
+                paths.append(str(path))
+
+            reader = VideoReader(video_path="dummy.mp4", frame_interval=6)
+            candidates = [
+                video_reader_module.FrameCandidate(paths[0], 0, 0.9, "a", 1),
+                video_reader_module.FrameCandidate(paths[1], 6, 0.1, "b", 2),
+                video_reader_module.FrameCandidate(paths[2], 12, 0.8, "c", 10),
+            ]
+
+            selected = reader._select_useful_frames(candidates)
+
+            self.assertEqual([pathlib.Path(p).name for p in selected], ["frame_00_00.jpg", "frame_00_12.jpg"])
+            self.assertFalse(pathlib.Path(paths[1]).exists())
+
+    def test_visual_segments_merge_continuous_similar_frames(self):
+        reader = VideoReader(video_path="dummy.mp4", frame_interval=6)
+        candidates = [
+            video_reader_module.FrameCandidate("a.jpg", 0, 0.6, "a", 100),
+            video_reader_module.FrameCandidate("b.jpg", 6, 0.9, "b", 101),
+            video_reader_module.FrameCandidate("c.jpg", 12, 0.7, "c", 10000),
+        ]
+
+        segments = reader._build_visual_segments(candidates)
+
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0].start, 0)
+        self.assertEqual(segments[0].end, 6)
+        self.assertEqual(segments[0].representative.path, "b.jpg")
+        self.assertEqual(segments[1].representative.path, "c.jpg")
+
+    def test_default_directories_are_scoped_by_video_path(self):
+        first = VideoReader(video_path="one.mp4")
+        second = VideoReader(video_path="two.mp4")
+
+        self.assertNotEqual(first.frame_dir, second.frame_dir)
+        self.assertIn("output_frames", first.frame_dir)
+        self.assertIn("grid_output", first.grid_dir)
+
+    def test_run_serializes_readers_sharing_output_directories(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            frame_dir = pathlib.Path(tmp_dir) / "frames"
+            grid_dir = pathlib.Path(tmp_dir) / "grids"
+            readers = [
+                VideoReader(video_path="same.mp4", frame_dir=str(frame_dir), grid_dir=str(grid_dir)),
+                VideoReader(video_path="same.mp4", frame_dir=str(frame_dir), grid_dir=str(grid_dir)),
+            ]
+            state_lock = threading.Lock()
+            state = {"active": 0, "peak": 0}
+
+            def _extract(*_args, **_kwargs):
+                with state_lock:
+                    state["active"] += 1
+                    state["peak"] = max(state["peak"], state["active"])
+                time.sleep(0.05)
+                with state_lock:
+                    state["active"] -= 1
+
+            results = []
+
+            def _run(reader):
+                results.append(reader.run())
+
+            with patch.object(VideoReader, "extract_frames", side_effect=_extract), \
+                    patch.object(VideoReader, "group_images", return_value=[]), \
+                    patch.object(VideoReader, "encode_images_to_base64", return_value=[]):
+                threads = [threading.Thread(target=_run, args=(reader,)) for reader in readers]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+
+            self.assertEqual(results, [[], []])
+            self.assertEqual(state["peak"], 1)
 
 
 if __name__ == "__main__":

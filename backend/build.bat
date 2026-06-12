@@ -22,6 +22,11 @@ for /f "tokens=2 delims=:" %%A in ('rustc -Vv ^| findstr "host"') do (
 set "TARGET_TRIPLE=%TARGET_TRIPLE: =%"
 echo Detected target triple: %TARGET_TRIPLE%
 
+if "%PYTHON_EXE%"=="" (
+    set "PYTHON_EXE=python"
+)
+echo Using Python: %PYTHON_EXE%
+
 
 REM --- 核心修改部分开始 ---
 
@@ -31,7 +36,7 @@ copy .env.example backend\.env
 
 REM 步骤 2: 执行 PyInstaller 打包，直接添加已存在的 .env 文件
 echo 开始 PyInstaller 打包...
-pyinstaller ^
+"%PYTHON_EXE%" -m PyInstaller ^
   -y ^
   --name BiliNoteBackend ^
   --paths backend ^

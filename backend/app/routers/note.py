@@ -1,6 +1,7 @@
 # app/routers/note.py
 import json
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -70,6 +71,25 @@ class VideoRequest(BaseModel):
 
 NOTE_OUTPUT_DIR = os.getenv("NOTE_OUTPUT_DIR", "note_results")
 UPLOAD_DIR = "uploads"
+
+
+def _load_json_file_safely(path: str, retries: int = 3, delay: float = 0.05):
+    """Read JSON that may be replaced by a worker thread while polling."""
+    last_error = None
+    for attempt in range(retries):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            if not content.strip():
+                raise json.JSONDecodeError("empty json file", content, 0)
+            return json.loads(content)
+        except (json.JSONDecodeError, OSError) as exc:
+            last_error = exc
+            if attempt < retries - 1:
+                time.sleep(delay)
+
+    logger.warning(f"读取 JSON 文件失败，稍后重试 (path={path}): {last_error}")
+    return None
 
 
 def save_note_to_file(task_id: str, note):
@@ -240,8 +260,13 @@ def get_task_status(task_id: str):
     result_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json")
 
     def _success_response(message: str = ""):
-        with open(result_path, "r", encoding="utf-8") as rf:
-            result_content = json.load(rf)
+        result_content = _load_json_file_safely(result_path)
+        if result_content is None:
+            return R.success({
+                "status": TaskStatus.PENDING.value,
+                "message": "结果文件正在写入，请稍后刷新",
+                "task_id": task_id
+            })
         return R.success({
             "status": TaskStatus.SUCCESS.value,
             "result": result_content,
@@ -251,8 +276,13 @@ def get_task_status(task_id: str):
 
     # 优先读状态文件
     if os.path.exists(status_path):
-        with open(status_path, "r", encoding="utf-8") as f:
-            status_content = json.load(f)
+        status_content = _load_json_file_safely(status_path)
+        if status_content is None:
+            return R.success({
+                "status": TaskStatus.PENDING.value,
+                "message": "任务状态正在更新，请稍后重试",
+                "task_id": task_id
+            })
 
         status = status_content.get("status")
         message = status_content.get("message", "")
@@ -270,10 +300,15 @@ def get_task_status(task_id: str):
                 })
 
         if status == TaskStatus.FAILED.value:
+            failed_response = R.success({
+                "status": TaskStatus.FAILED.value,
+                "message": message or "任务失败",
+                "task_id": task_id
+            })
             # 兼容手动修复/重试成功：结果文件比失败状态更新时，失败状态已经过期。
             if os.path.exists(result_path) and os.path.getmtime(result_path) > os.path.getmtime(status_path):
                 return _success_response(message)
-            return R.error(message or "任务失败", code=500)
+            return failed_response
 
         # 处理中状态
         return R.success({

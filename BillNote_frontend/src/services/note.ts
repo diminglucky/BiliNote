@@ -17,7 +17,7 @@ export const generateNote = async (data: {
 }) => {
   try {
     console.log('generateNote', data)
-    const response = await request.post('/generate_note', data)
+    const response = await request.post('/generate_note', data, { timeout: 60000 })
 
     if (!response) {
       if (response.data.msg) {
@@ -63,12 +63,9 @@ export const get_task_status = async (task_id: string) => {
   try {
     // 成功提示
 
-    return await request.get('/task_status/' + task_id)
+    return await request.get('/task_status/' + task_id, { suppressToast: true })
   } catch (e) {
     console.error('❌ 请求出错', e)
-
-    // 错误提示
-    toast.error('笔记生成失败，请稍后重试')
 
     throw e // 抛出错误以便调用方处理
   }

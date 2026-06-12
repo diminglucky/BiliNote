@@ -9,6 +9,11 @@ logger = get_logger(__name__)
 def insert_video_task(video_id: str, platform: str, task_id: str):
     db = next(get_db())
     try:
+        existing = db.query(VideoTask).filter_by(task_id=task_id).first()
+        if existing:
+            logger.info(f"Video task already exists, skip insert. task_id: {task_id}")
+            return
+
         task = VideoTask(video_id=video_id, platform=platform, task_id=task_id)
         db.add(task)
         db.commit()

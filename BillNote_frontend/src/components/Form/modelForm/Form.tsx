@@ -209,6 +209,11 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
     await loadModelsById(id!)
   }
 
+  const refreshEnabledModels = async () => {
+    const enabledModels = await loadModelsById(id!)
+    setModels(enabledModels || [])
+  }
+
   if (loading) return <div className="p-4">加载中...</div>
 
   return (
@@ -298,7 +303,7 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
             <h2 className={'font-bold'}>注意!</h2>
             <span>请确保已经保存供应商信息,以及通过测试连通性.</span>
           </div>
-          <ModelSelector providerId={id!} />
+          <ModelSelector providerId={id!} onModelSaved={refreshEnabledModels} />
 
           {/*<datalist id="model-options">*/}
           {/*  {modelOptions.map(model => (*/}

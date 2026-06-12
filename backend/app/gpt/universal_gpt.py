@@ -28,7 +28,20 @@ VISUAL_CODE_PROMPT = """
 - 结合截图左上角时间戳与转写时间，把代码片段放到对应章节。
 """
 
-PROMPT_VERSION = "visual-code-v3"
+NOTE_QUALITY_PROMPT = """
+
+Note quality requirements:
+- Write a study note, not a transcript recap. Do not follow the video sentence by sentence.
+- Organize by concepts, mechanisms, workflows, code structure, examples, and final conclusions.
+- For each major section, keep only useful facts: definition, why it matters, how it works, steps, constraints, examples, and result.
+- Merge repeated points. If two adjacent moments say the same thing, write it once in the clearest place.
+- Prefer concrete artifacts over vague narration: component names, files, functions, commands, UI results, diagrams, and before/after states.
+- If the speaker demonstrates code or an interface, summarize what the user should learn or reuse from that screen.
+- Avoid filler such as "the video explains", "then the speaker says", or generic background with no actionable information.
+- Use Chinese for the note body, but keep technical names such as ReAct, Plan and Execute, Thought, Action, Observation, Final Answer, Cursor, MANUS, and GPT-4o in English.
+"""
+
+PROMPT_VERSION = "visual-code-v4"
 
 CHUNK_EXTRACTION_PROMPT = """
 
@@ -91,6 +104,7 @@ class UniversalGPT(GPT):
         has_vision_images = bool(video_img_urls and self.supports_vision)
         if has_vision_images:
             content_text += VISUAL_CODE_PROMPT
+        content_text += NOTE_QUALITY_PROMPT
         if kwargs.get("chunk_mode"):
             content_text += CHUNK_EXTRACTION_PROMPT
 
@@ -148,7 +162,7 @@ class UniversalGPT(GPT):
                 f"笔记风格：{source.style}\n"
                 f"额外要求：{source.extras or ''}\n\n"
             )
-        merge_text = context + MERGE_PROMPT + "\n\n以下是按时间顺序提取的素材卡片：\n\n" + "\n\n---\n\n".join(partials)
+        merge_text = context + MERGE_PROMPT + NOTE_QUALITY_PROMPT + "\n\n以下是按时间顺序提取的素材卡片：\n\n" + "\n\n---\n\n".join(partials)
         # 合并阶段没有图片，直接用 string content 兼容非多模态模型（issue #282）
         return [{
             "role": "user",
