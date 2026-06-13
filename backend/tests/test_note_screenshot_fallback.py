@@ -8,6 +8,8 @@ import types
 import unittest
 from unittest.mock import patch
 
+from PIL import Image, ImageDraw
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -989,6 +991,20 @@ class TestNoteScreenshotFallback(unittest.TestCase):
         with patch.dict(os.environ, {"SCREENSHOT_VISION_REVIEW_LIMIT": "1"}, clear=False):
             self.assertFalse(agent.can_use_vision_review("balanced", _Gpt()))
 
+    def test_balanced_review_reservation_is_limited_atomically(self):
+        agent = visual_agent_module.VisualScreenshotAgent(image_output_dir=".", image_base_url="/static/screenshots")
+
+        class _Gpt:
+            supports_vision = True
+            model = "qwen-vl"
+            client = object()
+
+        with patch.dict(os.environ, {"SCREENSHOT_VISION_REVIEW_LIMIT": "1"}, clear=False):
+            self.assertTrue(agent.reserve_vision_review("balanced", _Gpt()))
+            self.assertFalse(agent.reserve_vision_review("balanced", _Gpt()))
+
+        self.assertEqual(agent._vision_review_count, 1)
+
     def test_balanced_review_counts_failed_review_attempt_against_limit(self):
         class _Reader:
             def __init__(self, *_args, **_kwargs):
@@ -1122,6 +1138,128 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             self.assertIsNotNone(candidate)
             self.assertTrue(all(ts >= 100 for ts in captured_timestamps))
             self.assertGreaterEqual(candidate.timestamp, 100)
+
+    def test_best_screenshot_rejects_sparse_end_card_cta_frame(self):
+        class _Reader:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            @staticmethod
+            def _calculate_file_md5(path):
+                return pathlib.Path(path).name
+
+            @staticmethod
+            def _score_frame(path):
+                timestamp = int(pathlib.Path(path).stem.split("_")[-1])
+                return (0.96 if timestamp >= 100 else 0.72), timestamp
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            created = []
+
+            def _generate(_video_path, _output_dir, timestamp, index):
+                path = pathlib.Path(tmp_dir) / f"shot_{index}_{timestamp}.png"
+                if timestamp >= 100:
+                    image = Image.new("RGB", (960, 540), "white")
+                    draw = ImageDraw.Draw(image)
+                    draw.rectangle((450, 245, 620, 315), fill="black")
+                    draw.rectangle((500, 270, 570, 292), fill="white")
+                    draw.rectangle((360, 500, 720, 518), fill=(120, 120, 120))
+                else:
+                    image = Image.new("RGB", (960, 540), (245, 248, 250))
+                    draw = ImageDraw.Draw(image)
+                    for row in range(8):
+                        y = 60 + row * 42
+                        draw.rectangle((80, y, 720, y + 22), fill=(30, 50 + row * 12, 90 + row * 8))
+                    draw.rectangle((760, 70, 900, 430), outline=(30, 120, 180), width=6)
+                    draw.line((780, 400, 890, 120), fill=(180, 40, 60), width=5)
+                image.save(path, format="PNG")
+                created.append(path)
+                return str(path)
+
+            agent = VisualScreenshotAgent(
+                image_output_dir=tmp_dir,
+                image_base_url="/static/screenshots",
+                video_reader_cls=_Reader,
+                screenshot_func=_generate,
+            )
+            candidate = agent.best_screenshot_near_timestamp(
+                video_path=pathlib.Path("video.mp4"),
+                timestamp=80,
+                duration=120,
+                index=0,
+                visual_reader=agent.create_visual_reader(pathlib.Path("video.mp4")),
+                search_end=118,
+                section_title="关键流程总结",
+                section_context="这里需要保存能写进笔记的流程图和最终结果，不要片尾关注页。",
+            )
+
+            self.assertIsNotNone(candidate)
+            self.assertLess(candidate.timestamp, 100)
+            self.assertEqual([path for path in created if path.exists()], [pathlib.Path(candidate.path)])
+
+    def test_best_screenshot_rejects_follow_and_credits_end_card(self):
+        class _Reader:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            @staticmethod
+            def _calculate_file_md5(path):
+                return pathlib.Path(path).name
+
+            @staticmethod
+            def _score_frame(path):
+                timestamp = int(pathlib.Path(path).stem.split("_")[-1])
+                return (0.97 if timestamp >= 100 else 0.74), timestamp
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            created = []
+
+            def _generate(_video_path, _output_dir, timestamp, index):
+                path = pathlib.Path(tmp_dir) / f"shot_{index}_{timestamp}.png"
+                image = Image.new("RGB", (960, 540), "white")
+                draw = ImageDraw.Draw(image)
+                if timestamp >= 100:
+                    draw.rectangle((390, 250, 460, 305), fill="black")
+                    draw.rectangle((500, 246, 640, 310), fill="black")
+                    draw.rectangle((518, 260, 622, 294), fill="white")
+                    draw.rectangle((430, 498, 900, 520), fill=(130, 130, 130))
+                    draw.rectangle((505, 498, 585, 520), fill=(220, 220, 0))
+                else:
+                    image = Image.new("RGB", (960, 540), (245, 248, 250))
+                    draw = ImageDraw.Draw(image)
+                    draw.rectangle((70, 60, 900, 110), fill=(35, 75, 150))
+                    draw.rectangle((70, 150, 520, 430), outline=(35, 75, 150), width=5)
+                    for col in range(4):
+                        x = 95 + col * 105
+                        draw.rectangle((x, 190, x + 70, 245), fill=(70, 130, 190))
+                        draw.line((x + 35, 245, x + 140, 330), fill=(180, 60, 80), width=5)
+                    draw.rectangle((610, 160, 890, 425), fill=(232, 238, 248), outline=(35, 75, 150), width=5)
+                    for row in range(5):
+                        draw.rectangle((640, 195 + row * 38, 850, 215 + row * 38), fill=(30, 50, 90))
+                image.save(path, format="PNG")
+                created.append(path)
+                return str(path)
+
+            agent = VisualScreenshotAgent(
+                image_output_dir=tmp_dir,
+                image_base_url="/static/screenshots",
+                video_reader_cls=_Reader,
+                screenshot_func=_generate,
+            )
+            candidate = agent.best_screenshot_near_timestamp(
+                video_path=pathlib.Path("video.mp4"),
+                timestamp=80,
+                duration=120,
+                index=0,
+                visual_reader=agent.create_visual_reader(pathlib.Path("video.mp4")),
+                search_end=118,
+                section_title="Plan and Execute 模式详解",
+                section_context="这里需要保存能写进笔记的执行流程和最终结果，不要关注、素材鸣谢或片尾页面。",
+            )
+
+            self.assertIsNotNone(candidate)
+            self.assertLess(candidate.timestamp, 100)
+            self.assertEqual([path for path in created if path.exists()], [pathlib.Path(candidate.path)])
 
 
 if __name__ == "__main__":

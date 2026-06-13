@@ -132,6 +132,7 @@ const NoteForm = () => {
   const navigate = useNavigate();
   const [isUploading, setIsUploading] = useState(false)
   const [uploadSuccess, setUploadSuccess] = useState(false)
+  const [isSubmitting, setIsSubmitting] = useState(false)
   /* ---- 全局状态 ---- */
   const { addPendingTask, currentTaskId, setCurrentTask, getCurrentTask, retryTask } =
     useTaskStore()
@@ -197,7 +198,7 @@ const NoteForm = () => {
 
   /* ---- 帮助函数 ---- */
   const isGenerating = () => !['SUCCESS', 'FAILED', undefined].includes(getCurrentTask()?.status)
-  const generating = isGenerating()
+  const generating = isSubmitting || isGenerating()
   const handleFileUpload = async (file: File, cb: (url: string) => void) => {
     const formData = new FormData()
     formData.append('file', file)
@@ -219,13 +220,19 @@ const NoteForm = () => {
 
   const onSubmit = async (values: NoteFormValues) => {
     console.log('Not even go here')
+    if (isSubmitting) return
     const payload: NoteFormValues = {
       ...values,
       provider_id: modelList.find(m => m.model_name === values.model_name)!.provider_id,
       task_id: currentTaskId || '',
     }
+    setIsSubmitting(true)
     if (currentTaskId) {
-      retryTask(currentTaskId, payload)
+      try {
+        await retryTask(currentTaskId, payload)
+      } finally {
+        setIsSubmitting(false)
+      }
       return
     }
 
@@ -248,6 +255,8 @@ const NoteForm = () => {
       }
       // 其余错误：axios 拦截器已经弹过 toast，这里只兜底不让 promise 变成未处理 rejection
       console.error('提交任务失败：', e)
+    } finally {
+      setIsSubmitting(false)
     }
   }
   const onInvalid = (errors: FieldErrors<NoteFormValues>) => {
@@ -260,7 +269,13 @@ const NoteForm = () => {
     setCurrentTask(null)
   }
   const FormButton = () => {
-    const label = generating ? '正在生成…' : editing ? '重新生成' : '生成笔记'
+    const label = isSubmitting
+      ? '正在提交...'
+      : generating
+        ? '正在生成...'
+        : editing
+          ? '重新生成'
+          : '生成笔记'
 
     return (
       <div className="flex gap-2">

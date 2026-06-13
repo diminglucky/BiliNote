@@ -1,7 +1,10 @@
 import importlib.util
+import os
 import pathlib
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -209,8 +212,7 @@ class TestVisualScreenshotGraph(unittest.TestCase):
                 on_markdown_update=_on_update,
             )
 
-            with self.assertRaisesRegex(RuntimeError, "score failed"):
-                agent.run(state)
+            result = agent.run(state)
 
             failed_files = [path for path in created if "fail_" in path.name]
             published_files = [pathlib.Path(path) for path in state.published_image_paths or []]
@@ -218,6 +220,206 @@ class TestVisualScreenshotGraph(unittest.TestCase):
             self.assertTrue(published_files)
             self.assertTrue(all(path.exists() for path in published_files))
             self.assertTrue(all(not path.exists() for path in failed_files))
+            self.assertIs(result, state)
+            self.assertNotIn("*Screenshot", state.markdown)
+            self.assertIn("score failed", "\n".join(state.diagnostics or []))
+
+    def test_dynamic_slot_workflow_isolates_individual_slot_failure(self):
+        from app.services.visual_screenshot_agent import VisualScreenshotAgent, VisualScreenshotState
+
+        class _Reader:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            @staticmethod
+            def _calculate_file_md5(path):
+                return pathlib.Path(path).name
+
+            @staticmethod
+            def _score_frame(path):
+                candidate_index = int(pathlib.Path(path).stem.split("_")[1])
+                if candidate_index >= 10:
+                    raise RuntimeError("second slot failed")
+                return 0.92, pathlib.Path(path).name
+
+            @staticmethod
+            def _is_same_visual_state(_left, _right):
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            def _generate(_video_path, _output_dir, timestamp, index):
+                path = pathlib.Path(tmp_dir) / f"slot_{index}_{timestamp}.jpg"
+                path.write_bytes(f"image-{timestamp}".encode())
+                return str(path)
+
+            agent = VisualScreenshotAgent(
+                image_output_dir=tmp_dir,
+                image_base_url="/static/screenshots",
+                video_reader_cls=_Reader,
+                screenshot_func=_generate,
+            )
+            state = VisualScreenshotState(
+                markdown=(
+                    "## First visual *Content-[00:00]\n"
+                    "This screen demo shows a UI, code, page, and final result.\n"
+                    "*Screenshot-[00:10]\n\n"
+                    "## Second visual *Content-[01:00]\n"
+                    "This screen demo shows another UI, code, page, and final result.\n"
+                    "*Screenshot-[01:10]\n"
+                ),
+                video_path=pathlib.Path("video.mp4"),
+                duration=120,
+            )
+
+            result = agent.run(state)
+
+        self.assertIs(result, state)
+        self.assertEqual(state.execution_engine, "langgraph")
+        self.assertEqual(state.markdown.count("![]("), 1)
+        self.assertNotIn("*Screenshot", state.markdown)
+        self.assertIn("second slot failed", "\n".join(state.diagnostics or []))
+
+    def test_dynamic_slot_workflow_respects_balanced_vision_review_budget(self):
+        from app.services.visual_screenshot_agent import VisualScreenshotAgent, VisualScreenshotState
+
+        class _Reader:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            @staticmethod
+            def _calculate_file_md5(path):
+                return pathlib.Path(path).name
+
+            @staticmethod
+            def _score_frame(path):
+                timestamp = int(pathlib.Path(path).stem.split("_")[-1])
+                return (0.82 if timestamp < 40 else 0.78), timestamp
+
+            @staticmethod
+            def _is_same_visual_state(_left, _right):
+                return False
+
+        class _Gpt:
+            supports_vision = True
+            model = "qwen-vl"
+            client = object()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            review_calls = []
+
+            def _generate(_video_path, _output_dir, timestamp, index):
+                path = pathlib.Path(tmp_dir) / f"slot_{index}_{timestamp}.jpg"
+                path.write_bytes(f"image-{timestamp}".encode())
+                return str(path)
+
+            def _review(_self, candidates, *_args, **_kwargs):
+                review_calls.append(candidates)
+                return max(candidates, key=lambda item: item.timestamp)
+
+            agent = VisualScreenshotAgent(
+                image_output_dir=tmp_dir,
+                image_base_url="/static/screenshots",
+                video_reader_cls=_Reader,
+                screenshot_func=_generate,
+            )
+            state = VisualScreenshotState(
+                markdown=(
+                    "## Plan-And-Execute Agent *Content-[00:00]\n"
+                    "This UI needs the complete Plan and Execute final result screen.\n"
+                    "*Screenshot-[00:00]\n\n"
+                    "## Second Agent workflow *Content-[01:00]\n"
+                    "This UI also needs the complete Plan and Execute final result screen.\n"
+                    "*Screenshot-[01:00]\n"
+                ),
+                video_path=pathlib.Path("video.mp4"),
+                duration=120,
+                gpt=_Gpt(),
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SCREENSHOT_REVIEW_MODE": "balanced",
+                    "SCREENSHOT_VISION_REVIEW_LIMIT": "1",
+                },
+                clear=False,
+            ), patch.object(
+                VisualScreenshotAgent,
+                "review_screenshot_candidates",
+                _review,
+            ):
+                result = agent.run(state)
+
+        self.assertIs(result, state)
+        self.assertEqual(len(review_calls), 1)
+        self.assertEqual(agent._vision_review_count, 1)
+        self.assertEqual(state.markdown.count("![]("), 2)
+
+    def test_dynamic_slot_workflow_limits_slot_concurrency(self):
+        from app.services.visual_screenshot_agent import VisualScreenshotAgent, VisualScreenshotState
+
+        class _Reader:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            @staticmethod
+            def _calculate_file_md5(path):
+                return pathlib.Path(path).name
+
+            @staticmethod
+            def _score_frame(_path):
+                return 0.92, 123
+
+            @staticmethod
+            def _is_same_visual_state(_left, _right):
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            active = 0
+            max_active = 0
+            lock = threading.Lock()
+
+            def _generate(_video_path, _output_dir, timestamp, index):
+                nonlocal active, max_active
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                try:
+                    time.sleep(0.03)
+                    path = pathlib.Path(tmp_dir) / f"slot_{index}_{timestamp}.jpg"
+                    path.write_bytes(f"image-{timestamp}".encode())
+                    return str(path)
+                finally:
+                    with lock:
+                        active -= 1
+
+            markdown = "\n\n".join(
+                [
+                    (
+                        f"## Visual section {idx} *Content-[0{idx}:00]\n"
+                        "This screen demo shows UI, code, page, and final result.\n"
+                        f"*Screenshot-[0{idx}:05]"
+                    )
+                    for idx in range(4)
+                ]
+            )
+            with patch.dict(os.environ, {"SCREENSHOT_SLOT_CONCURRENCY": "2"}, clear=False):
+                agent = VisualScreenshotAgent(
+                    image_output_dir=tmp_dir,
+                    image_base_url="/static/screenshots",
+                    video_reader_cls=_Reader,
+                    screenshot_func=_generate,
+                )
+                state = VisualScreenshotState(
+                    markdown=markdown,
+                    video_path=pathlib.Path("video.mp4"),
+                    duration=360,
+                )
+
+                result = agent.run(state)
+
+        self.assertIs(result, state)
+        self.assertLessEqual(max_active, 2)
 
     def test_real_langgraph_path_cleans_candidate_files_when_scoring_fails(self):
         from app.services.visual_screenshot_agent import VisualScreenshotAgent, VisualScreenshotState
@@ -263,11 +465,13 @@ class TestVisualScreenshotGraph(unittest.TestCase):
                 duration=60,
             )
 
-            with self.assertRaisesRegex(RuntimeError, "score failed"):
-                agent.run(state)
+            result = agent.run(state)
 
         self.assertTrue(created)
         self.assertTrue(all(not path.exists() for path in created))
+        self.assertIs(result, state)
+        self.assertNotIn("*Screenshot", state.markdown)
+        self.assertIn("score failed", "\n".join(state.diagnostics or []))
 
     def test_real_langgraph_path_fails_when_no_candidate_file_is_generated(self):
         from app.services.visual_screenshot_agent import VisualScreenshotAgent, VisualScreenshotState
@@ -308,10 +512,11 @@ class TestVisualScreenshotGraph(unittest.TestCase):
                 duration=60,
             )
 
-            with self.assertRaisesRegex(RuntimeError, "未生成可用截图候选"):
-                agent.run(state)
+            result = agent.run(state)
 
-        self.assertIn("*Screenshot", state.markdown)
+        self.assertIs(result, state)
+        self.assertNotIn("*Screenshot", state.markdown)
+        self.assertIn("未生成可用截图候选", "\n".join(state.diagnostics or []))
 
     def test_real_langgraph_path_fails_and_cleans_low_quality_candidate(self):
         from app.services.visual_screenshot_agent import VisualScreenshotAgent, VisualScreenshotState
@@ -357,11 +562,13 @@ class TestVisualScreenshotGraph(unittest.TestCase):
                 duration=60,
             )
 
-            with self.assertRaisesRegex(RuntimeError, "截图候选质量过低"):
-                agent.run(state)
+            result = agent.run(state)
 
         self.assertTrue(created)
         self.assertTrue(all(not path.exists() for path in created))
+        self.assertIs(result, state)
+        self.assertNotIn("*Screenshot", state.markdown)
+        self.assertIn("截图候选质量过低", "\n".join(state.diagnostics or []))
 
 
 if __name__ == "__main__":

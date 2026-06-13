@@ -76,7 +76,7 @@ interface TaskStore {
   clearTasks: () => void
   setCurrentTask: (taskId: string | null) => void
   getCurrentTask: () => Task | null
-  retryTask: (id: string) => void
+  retryTask: (id: string, payload?: any) => Promise<void>
 }
 
 export const useTaskStore = create<TaskStore>()(
@@ -127,6 +127,15 @@ export const useTaskStore = create<TaskStore>()(
               // 如果是 markdown 字符串，封装为版本
               if (typeof data.markdown === 'string') {
                 const prev = task.markdown
+                const latestContent = Array.isArray(prev)
+                  ? prev[0]?.content || ''
+                  : typeof prev === 'string'
+                    ? prev
+                    : ''
+                if (data.markdown === latestContent) {
+                  const { markdown: _markdown, ...rest } = data
+                  return { ...task, ...rest }
+                }
                 const newVersion: Markdown = {
                   ver_id: `${task.id}-${uuidv4()}`,
                   content: data.markdown,
@@ -181,6 +190,7 @@ export const useTaskStore = create<TaskStore>()(
 
         const newFormData = payload || task.formData
         const previousStatus = task.status
+        const previousMessage = task.message
         set(state => ({
           tasks: state.tasks.map(t =>
               t.id === id
@@ -188,6 +198,7 @@ export const useTaskStore = create<TaskStore>()(
                     ...t,
                     formData: newFormData,
                     status: 'PENDING',
+                    message: '正在提交重新生成请求...',
                   }
                   : t
           ),
@@ -204,6 +215,7 @@ export const useTaskStore = create<TaskStore>()(
                     ? {
                       ...t,
                       status: previousStatus,
+                      message: previousMessage,
                     }
                     : t
             ),
@@ -229,6 +241,7 @@ export const useTaskStore = create<TaskStore>()(
                     ...t,
                     formData: newFormData, // ✅ 显式更新 formData
                     status: 'PENDING',
+                    message: '任务已提交，等待后端开始处理...',
                   }
                   : t
           ),

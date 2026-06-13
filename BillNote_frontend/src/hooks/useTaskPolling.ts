@@ -3,6 +3,11 @@ import { useTaskStore } from '@/store/taskStore'
 import { get_task_status } from '@/services/note.ts'
 import toast from 'react-hot-toast'
 
+const latestMarkdownContent = (markdown: any): string => {
+  if (Array.isArray(markdown)) return markdown[0]?.content || ''
+  return typeof markdown === 'string' ? markdown : ''
+}
+
 export const useTaskPolling = (interval = 3000) => {
   const tasks = useTaskStore(state => state.tasks)
   const updateTaskContent = useTaskStore(state => state.updateTaskContent)
@@ -34,7 +39,8 @@ export const useTaskPolling = (interval = 3000) => {
               if (status === 'SUCCESS' && task.status !== 'SUCCESS') {
                 toast.success('笔记生成成功')
               }
-              if (status !== task.status || message !== task.message || markdown !== task.markdown) {
+              const latestMarkdown = latestMarkdownContent(task.markdown)
+              if (status !== task.status || message !== task.message || markdown !== latestMarkdown) {
                 updateTaskContent(task.id, {
                   status,
                   message,

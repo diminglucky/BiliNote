@@ -6,9 +6,12 @@ import mimetypes
 import os
 import re
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple, Type
+
+from PIL import Image, ImageFilter, ImageStat
 
 from app.gpt.base import GPT
 from app.services.visual_screenshot_graph import run_visual_screenshot_graph
@@ -74,6 +77,24 @@ class VisualSectionPlan:
 
 
 @dataclass
+class VisualScreenshotSlot:
+    slot_id: int
+    mode: str
+    timestamp: int
+    index: int
+    marker: Optional[str] = None
+    plan: Optional[VisualSectionPlan] = None
+
+
+@dataclass
+class VisualScreenshotSlotResult:
+    slot: VisualScreenshotSlot
+    candidate: Optional[FrameCandidate] = None
+    generated_paths: Optional[List[str]] = None
+    error: Optional[str] = None
+
+
+@dataclass
 class VisualScreenshotState:
     markdown: str
     video_path: Path
@@ -81,6 +102,7 @@ class VisualScreenshotState:
     gpt: Optional[GPT] = None
     matches: Optional[List[Tuple[str, int]]] = None
     visual_plans: Optional[List[VisualSectionPlan]] = None
+    slots: Optional[List[VisualScreenshotSlot]] = None
     generated_images: Optional[List[Tuple[int, str]]] = None
     generated_image_paths: Optional[List[str]] = None
     published_image_paths: Optional[List[str]] = None
@@ -104,6 +126,10 @@ class VisualScreenshotAgent:
         self.video_reader_cls = video_reader_cls
         self.screenshot_func = screenshot_func
         self._vision_review_count = 0
+        self._vision_review_lock = threading.Lock()
+        self._slot_semaphore = threading.Semaphore(
+            _env_int("SCREENSHOT_SLOT_CONCURRENCY", 2, 1, 8)
+        )
 
     def insert_screenshots(
         self,
@@ -142,6 +168,7 @@ class VisualScreenshotAgent:
             state.diagnostics = []
         state.matches = extract_screenshot_timestamps(state.markdown)
         state.visual_plans = self.plan_visual_screenshots(state.markdown, state.duration)
+        state.slots = []
         state.generated_images = []
         state.generated_image_paths = []
         state.published_image_paths = []
@@ -159,30 +186,152 @@ class VisualScreenshotAgent:
         return state
 
     def compose_images_node(self, state: VisualScreenshotState) -> VisualScreenshotState:
+        if state.slots is None or (
+            not state.slots and ((state.matches or []) or (state.visual_plans or []))
+        ):
+            state.slots = self.plan_screenshot_slots(state)
+        visual_reader = self.create_visual_reader(state.video_path)
+        results = [
+            self.process_screenshot_slot(state, slot)
+            for slot in state.slots
+        ]
+        self.apply_screenshot_slot_results(state, results, visual_reader)
+        return state
+
+    def plan_slots_node(self, state: VisualScreenshotState) -> VisualScreenshotState:
+        state.slots = self.plan_screenshot_slots(state)
+        return state
+
+    def plan_screenshot_slots(self, state: VisualScreenshotState) -> List[VisualScreenshotSlot]:
         matches = state.matches or []
         visual_plans = state.visual_plans or []
+        slots: List[VisualScreenshotSlot] = []
+        selected_plan_starts: set[int] = set()
 
-        if not matches:
-            state.markdown = self.fallback_plan_images_node(state)
-            return state
+        for idx, (marker, ts) in enumerate(matches):
+            plan = self.matching_visual_plan(ts, visual_plans)
+            if plan:
+                selected_plan_starts.add(plan.start)
+            slots.append(VisualScreenshotSlot(
+                slot_id=len(slots),
+                mode="marker",
+                timestamp=ts,
+                index=idx,
+                marker=marker,
+                plan=plan,
+            ))
 
-        visual_reader = self.create_visual_reader(state.video_path)
+        supplement_limit = _env_int("SCREENSHOT_SUPPLEMENT_LIMIT", 4, 0, 20)
+        if supplement_limit > 0:
+            missing_plans = [plan for plan in visual_plans if plan.start not in selected_plan_starts]
+            missing_plans = sorted(missing_plans, key=lambda item: (-item.score, item.start))[:supplement_limit]
+            missing_plans.sort(key=lambda item: item.start)
+            for offset, plan in enumerate(missing_plans):
+                slots.append(VisualScreenshotSlot(
+                    slot_id=len(slots),
+                    mode="fallback",
+                    timestamp=plan.start,
+                    index=len(matches) + offset,
+                    plan=plan,
+                ))
+
+        return slots
+
+    def process_screenshot_slot(
+        self,
+        state: VisualScreenshotState,
+        slot: VisualScreenshotSlot,
+    ) -> VisualScreenshotSlotResult:
+        generated_paths: List[str] = []
+        plan = slot.plan
+        with self._slot_semaphore:
+            try:
+                visual_reader = self.create_visual_reader(state.video_path)
+                candidate = self.best_screenshot_near_timestamp(
+                    video_path=state.video_path,
+                    timestamp=slot.timestamp,
+                    duration=state.duration,
+                    index=slot.index,
+                    visual_reader=visual_reader,
+                    search_end=plan.end if plan else None,
+                    gpt=state.gpt,
+                    section_title=plan.title if plan else "",
+                    section_context=self.section_context_for_plan(state.markdown, plan) if plan else "",
+                    generated_image_paths=generated_paths,
+                )
+                if candidate is None:
+                    raise RuntimeError(f"鏈壘鍒板彲鐢ㄦ埅鍥惧€欓€? {slot.timestamp}")
+                if not Path(candidate.path).exists():
+                    raise FileNotFoundError(candidate.path)
+                return VisualScreenshotSlotResult(
+                    slot=slot,
+                    candidate=candidate,
+                    generated_paths=generated_paths,
+                )
+            except Exception as exc:
+                for image_path in generated_paths:
+                    try:
+                        Path(image_path).unlink(missing_ok=True)
+                    except Exception as cleanup_exc:
+                        logger.warning("娓呯悊澶辫触鎴浘鍊欓€夊け璐? (%s): %s", image_path, cleanup_exc)
+                return VisualScreenshotSlotResult(
+                    slot=slot,
+                    generated_paths=generated_paths,
+                    error=str(exc),
+                )
+
+    def apply_screenshot_slot_results(
+        self,
+        state: VisualScreenshotState,
+        results: List[VisualScreenshotSlotResult],
+        visual_reader: VideoReader,
+    ) -> None:
+        if state.generated_image_paths is None:
+            state.generated_image_paths = []
+        if state.generated_images is None:
+            state.generated_images = []
+
         inserted_visuals: List[FrameCandidate] = []
-        generated_images = self.marker_images_node(state, visual_reader, inserted_visuals)
-        if state.generated_images is not None:
-            state.generated_images.extend(generated_images)
+        successful_slots = 0
 
-        fallback_images = self.supplement_missing_plan_images_node(
-            state,
-            visual_reader,
-            inserted_visuals,
-            generated_images,
-            start_index=len(matches),
-        )
-        if fallback_images:
-            if state.generated_images is not None:
-                state.generated_images.extend(fallback_images)
-        return state
+        for result in sorted(results, key=lambda item: item.slot.slot_id):
+            state.generated_image_paths.extend(result.generated_paths or [])
+            slot = result.slot
+            if result.error or result.candidate is None:
+                self.add_diagnostic(state, f"{slot.mode}_failed:{slot.timestamp}:{result.error}")
+                logger.warning(
+                    "鎴浘 slot 澶辫触 (mode=%s timestamp=%s): %s",
+                    slot.mode,
+                    slot.timestamp,
+                    result.error,
+                )
+                if slot.mode == "marker" and slot.marker:
+                    state.markdown = state.markdown.replace(slot.marker, "", 1)
+                continue
+
+            candidate = result.candidate
+            if any(visual_reader._is_same_visual_state(prev, candidate) for prev in inserted_visuals):
+                Path(candidate.path).unlink(missing_ok=True)
+                if slot.mode == "marker" and slot.marker:
+                    state.markdown = state.markdown.replace(slot.marker, "", 1)
+                continue
+
+            inserted_visuals.append(candidate)
+            image_markdown = f"![]({self.image_url(candidate.path)})"
+            if slot.mode == "marker" and slot.marker:
+                state.markdown = state.markdown.replace(slot.marker, image_markdown, 1)
+            else:
+                state.markdown = self.insert_fallback_images_near_sections(
+                    state.markdown,
+                    [(candidate.timestamp, image_markdown)],
+                )
+            state.generated_images.append((candidate.timestamp, image_markdown))
+            successful_slots += 1
+            if self.publish_incremental_update(state, candidate.timestamp, image_markdown):
+                self.mark_published_image(state, candidate.path)
+
+        if not successful_slots and any(result.error for result in results):
+            logger.info("鎴浘澧炲己鏈彃鍏ユ垚鍔熸埅鍥撅紝淇濈暀鍩虹绗旇")
 
     def create_visual_reader(self, video_path: Path) -> VideoReader:
         return self.video_reader_cls(
@@ -591,7 +740,27 @@ class VisualScreenshotAgent:
             return False
         if review_mode == "balanced":
             limit = _env_int("SCREENSHOT_VISION_REVIEW_LIMIT", 3, 0, 20)
-            return self._vision_review_count < limit
+            with self._vision_review_lock:
+                return self._vision_review_count < limit
+        return True
+
+    def reserve_vision_review(self, review_mode: str, gpt: Optional[GPT]) -> bool:
+        if review_mode == "off":
+            return False
+        if not (
+            gpt
+            and getattr(gpt, "supports_vision", False)
+            and getattr(gpt, "client", None)
+            and getattr(gpt, "model", None)
+        ):
+            return False
+        if review_mode == "balanced":
+            limit = _env_int("SCREENSHOT_VISION_REVIEW_LIMIT", 3, 0, 20)
+            with self._vision_review_lock:
+                if self._vision_review_count >= limit:
+                    return False
+                self._vision_review_count += 1
+                return True
         return True
 
     @staticmethod
@@ -814,6 +983,80 @@ class VisualScreenshotAgent:
                 selected.add(interior[source_idx])
         return sorted(selected)
 
+    @staticmethod
+    def non_note_frame_penalty(file_path: str, timestamp: int, duration: Optional[float] = None) -> float:
+        """Penalize sparse end-card/CTA frames that are clear but not useful for notes."""
+        try:
+            Image.init()
+            with Image.open(file_path) as img:
+                rgb = img.convert("RGB").resize((160, 90), Image.Resampling.LANCZOS)
+                gray = rgb.convert("L")
+                hsv = rgb.convert("HSV")
+                stats = ImageStat.Stat(gray)
+                entropy = gray.entropy()
+                edges = gray.filter(ImageFilter.FIND_EDGES)
+                edge_pixels = sum(1 for value in edges.getdata() if value > 28)
+                edge_ratio = edge_pixels / max(1, gray.width * gray.height)
+                saturation_data = list(hsv.getchannel("S").getdata())
+                value_data = list(hsv.getchannel("V").getdata())
+                center = rgb.crop((
+                    int(rgb.width * 0.30),
+                    int(rgb.height * 0.33),
+                    int(rgb.width * 0.70),
+                    int(rgb.height * 0.70),
+                ))
+                bottom = gray.crop((
+                    0,
+                    int(gray.height * 0.82),
+                    gray.width,
+                    gray.height,
+                ))
+        except Exception:
+            return 0.0
+
+        pixel_count = max(1, len(value_data))
+        colorful_ratio = sum(
+            1 for sat, val in zip(saturation_data, value_data)
+            if sat > 46 and val > 55
+        ) / pixel_count
+        very_bright_ratio = sum(1 for val in value_data if val > 235) / pixel_count
+        very_dark_ratio = sum(1 for val in value_data if val < 35) / pixel_count
+        near_video_end = bool(duration and timestamp >= max(float(duration) * 0.88, float(duration) - 120))
+        center_pixels = list(center.getdata())
+        center_black_ratio = sum(
+            1 for red, green, blue in center_pixels
+            if red < 42 and green < 42 and blue < 42
+        ) / max(1, len(center_pixels))
+        bottom_values = list(bottom.getdata())
+        bottom_text_ratio = sum(1 for val in bottom_values if val < 145) / max(1, len(bottom_values))
+        sparse_white_card = (
+            very_bright_ratio >= 0.82
+            and colorful_ratio <= 0.035
+            and entropy <= 2.2
+            and edge_ratio <= 0.16
+            and very_dark_ratio <= 0.18
+        )
+        end_card_cta = (
+            very_bright_ratio >= 0.76
+            and colorful_ratio <= 0.06
+            and center_black_ratio >= 0.055
+            and bottom_text_ratio >= 0.018
+            and edge_ratio <= 0.20
+        )
+        if end_card_cta and near_video_end:
+            return 0.78
+        if end_card_cta:
+            return 0.50
+        if sparse_white_card and (near_video_end or entropy <= 1.35):
+            return 0.72
+        if sparse_white_card:
+            return 0.42
+        if very_bright_ratio >= 0.90 and colorful_ratio <= 0.02 and entropy <= 1.4:
+            return 0.55
+        if stats.mean[0] >= 238 and entropy <= 1.1 and edge_ratio <= 0.08:
+            return 0.45
+        return 0.0
+
     def plan_visual_screenshots(
         self,
         markdown: str,
@@ -963,6 +1206,9 @@ class VisualScreenshotAgent:
                 generated_image_paths.append(img_path)
             exact_hash = visual_reader._calculate_file_md5(img_path)
             score, perceptual_hash = visual_reader._score_frame(img_path)
+            penalty = self.non_note_frame_penalty(img_path, ts, duration)
+            if penalty:
+                score = max(0.0, score - penalty)
             candidates.append(FrameCandidate(
                 path=img_path,
                 timestamp=ts,
@@ -1032,10 +1278,8 @@ class VisualScreenshotAgent:
             )
         )
         if should_review:
-            has_vision_reviewer = self.can_use_vision_review(review_mode, gpt)
+            has_vision_reviewer = self.reserve_vision_review(review_mode, gpt)
             if has_vision_reviewer:
-                if review_mode == "balanced":
-                    self._vision_review_count += 1
                 reviewed_best = self.review_screenshot_candidates(
                     candidates,
                     gpt,

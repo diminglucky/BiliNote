@@ -10,6 +10,9 @@ import unittest
 from unittest.mock import patch
 
 
+_ORIGINAL_MODULES = {}
+
+
 def _install_stubs():
     app_mod = types.ModuleType("app")
     utils_pkg = types.ModuleType("app.utils")
@@ -73,6 +76,17 @@ def _install_stubs():
     path_helper_mod.get_app_dir = _get_app_dir
     ffmpeg_mod.probe = lambda *_args, **_kwargs: {"format": {"duration": "0"}}
 
+    stubbed_names = [
+        "PIL",
+        "PIL.Image",
+        "PIL.ImageDraw",
+        "PIL.ImageFilter",
+        "PIL.ImageFont",
+        "PIL.ImageStat",
+    ]
+    for name in stubbed_names:
+        _ORIGINAL_MODULES[name] = sys.modules.get(name)
+
     sys.modules.setdefault("app", app_mod)
     sys.modules.setdefault("app.utils", utils_pkg)
     sys.modules["PIL"] = pil_mod
@@ -86,6 +100,14 @@ def _install_stubs():
     sys.modules["app.utils.path_helper"] = path_helper_mod
 
 
+def _restore_stubbed_modules():
+    for name, original in _ORIGINAL_MODULES.items():
+        if original is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = original
+
+
 def _load_video_reader_module():
     _install_stubs()
     root = pathlib.Path(__file__).resolve().parents[1]
@@ -94,7 +116,10 @@ def _load_video_reader_module():
     if spec is None or spec.loader is None:
         raise ImportError("video_reader module spec not found")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        _restore_stubbed_modules()
     return module
 
 
