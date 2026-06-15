@@ -613,7 +613,7 @@ class VisualScreenshotAgent:
             review_candidates = sorted(by_path.values(), key=lambda item: item.timestamp)
 
         prompt = (
-            "你是 BiliNote 的截图评审器。请从候选截图中选择最适合插入学习笔记的一张。\n"
+            "你是 VideoNote 的截图评审器。请从候选截图中选择最适合插入学习笔记的一张。\n"
             "选择标准按优先级排序：\n"
             "1. 与当前章节标题和正文最相关。\n"
             "2. 信息完整，优先包含最终结果、更新后的计划、运行结果、完整流程图或关键代码。\n"

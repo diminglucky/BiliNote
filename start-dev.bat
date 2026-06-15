@@ -10,11 +10,11 @@ if not exist "%PYTHON_EXE%" (
   exit /b 1
 )
 
-echo Starting BiliNote backend on http://127.0.0.1:8483 ...
-start "BiliNote Backend" "%~dp0start-backend.bat"
+echo Starting VideoNote backend on http://127.0.0.1:8483 ...
+start "VideoNote Backend" "%~dp0start-backend.bat"
 
-echo Starting BiliNote frontend on http://127.0.0.1:3015 ...
-start "BiliNote Frontend" "%~dp0start-frontend.bat"
+echo Starting VideoNote frontend on http://127.0.0.1:3015 ...
+start "VideoNote Frontend" "%~dp0start-frontend.bat"
 
 echo.
 echo Open http://127.0.0.1:3015 after both windows finish starting.

@@ -1,6 +1,5 @@
 import { Switch } from '@/components/ui/switch'
 import { FC } from 'react'
-import styles from './index.module.css'
 import { useNavigate, useParams } from 'react-router-dom'
 import AILogo from '@/components/Form/modelForm/Icons'
 import { useProviderStore } from '@/store/providerStore'
@@ -39,24 +38,25 @@ const ProviderCard: FC<IProviderCardProps> = ({
 
   return (
     <div
-      className={
-        styles.card +
-        ' flex h-14 cursor-pointer items-center justify-between rounded border border-[#f3f3f3] p-2' +
-        (isActive ? ' bg-[#F0F0F0] font-semibold text-blue-600' : '')
-      }
+      className={`flex h-14 cursor-pointer items-center justify-between gap-3 rounded-md border px-3 transition ${
+        isActive
+          ? 'border-blue-200 bg-blue-50 text-blue-700 shadow-sm'
+          : 'border-neutral-200 bg-white text-neutral-900 hover:border-neutral-300 hover:bg-neutral-50'
+      }`}
+      aria-current={isActive ? 'page' : undefined}
       // 整行可点跳转到对应供应商编辑页（之前 onClick 只挂在 icon+名字那一小块 div 上，
       // 名字和开关之间的空白区域点不动）
       onClick={() => navigate(`/settings/model/${id}`)}
     >
-      <div className="flex items-center text-lg">
-        <div className="flex h-9 w-9 items-center">
+      <div className="flex min-w-0 items-center gap-2.5 text-base">
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-md bg-white">
           <AILogo name={Icon} />
         </div>
-        <div className="font-semibold">{providerName}</div>
+        <div className="min-w-0 truncate font-semibold">{providerName}</div>
       </div>
 
       {/* Switch 自己的点击不应该冒泡触发整行跳转 */}
-      <div onClick={e => e.stopPropagation()}>
+      <div className="shrink-0" onClick={e => e.stopPropagation()}>
         <Switch
           checked={isChecked}
           onCheckedChange={handleToggle}

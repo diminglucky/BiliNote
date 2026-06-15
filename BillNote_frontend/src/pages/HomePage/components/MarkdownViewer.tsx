@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef, useMemo, memo, FC } from 'react'
+import { useState, useEffect, useMemo, memo, FC } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Button } from '@/components/ui/button.tsx'
-import { Copy, Download, ArrowRight, Play, ExternalLink } from 'lucide-react'
+import { Copy, Download, ArrowRight, Play, ExternalLink, FileText, Sparkles, Loader2 } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import Error from '@/components/Lottie/error.tsx'
 import Loading from '@/components/Lottie/Loading.tsx'
@@ -15,6 +15,7 @@ import gfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import rehypeSlug from 'rehype-slug'
+import JSZip from 'jszip'
 import 'katex/dist/katex.min.css'
 import 'github-markdown-css/github-markdown-light.css'
 import { ScrollArea } from '@/components/ui/scroll-area.tsx'
@@ -35,7 +36,6 @@ interface VersionNote {
 }
 
 interface MarkdownViewerProps {
-  content: string | VersionNote[]
   status: 'idle' | 'loading' | 'success' | 'failed'
 }
 
@@ -51,6 +51,104 @@ const steps = [
 
 const remarkPlugins = [gfm, remarkMath]
 const rehypePlugins = [rehypeKatex, rehypeSlug]
+const markdownImagePattern = /[\uFFFC\uFFFD\uFEFF]?[ \t]*![ \t]*\[([^\]]*)\][ \t]*\(([^)\r\n]+)\)/g
+
+const sanitizeFileName = (name: string) =>
+  (name || 'note').replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 120) || 'note'
+
+const cleanMarkdownImageSrc = (rawSrc: string) => {
+  const trimmed = rawSrc.trim()
+  const withoutAngleBrackets = trimmed.startsWith('<') && trimmed.endsWith('>')
+    ? trimmed.slice(1, -1)
+    : trimmed
+  const titleMatch = withoutAngleBrackets.match(/^(.+?)(?:\s+["'][^"']*["'])$/)
+  return (titleMatch?.[1] || withoutAngleBrackets).trim()
+}
+
+const normalizeBrokenImageSyntax = (markdown: string) =>
+  markdown
+    .replace(/[\uFFFC\uFFFD\uFEFF]+[ \t]*![ \t]*\[/g, '![')
+    .replace(/!\s+\[/g, '![')
+    .replace(/\]\s+\(/g, '](')
+    .replace(/^\s*!\[\]\((images\/[^)\r\n]+)\)\s*$/gm, '![]($1)')
+    .replace(/!\[([^\]]*)\]\(([^)\r\n]+)\)(?=!\[)/g, '![$1]($2)\n\n')
+
+const dataUriToBlob = (dataUri: string) => {
+  const match = dataUri.match(/^data:([^;,]+)?(;base64)?,(.*)$/)
+  if (!match) return null
+  const mimeType = match[1] || 'application/octet-stream'
+  const isBase64 = Boolean(match[2])
+  const payload = isBase64 ? atob(match[3]) : decodeURIComponent(match[3])
+  const bytes = new Uint8Array(payload.length)
+  for (let i = 0; i < payload.length; i += 1) {
+    bytes[i] = payload.charCodeAt(i)
+  }
+  return new Blob([bytes], { type: mimeType })
+}
+
+const blobToDataUri = (blob: Blob) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(reader.error || new Error('图片编码失败'))
+    reader.readAsDataURL(blob)
+  })
+
+const getImageExtension = (src: string, blob?: Blob | null) => {
+  const mimeExtMap: Record<string, string> = {
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/jpg': 'jpg',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+    'image/bmp': 'bmp',
+    'image/svg+xml': 'svg',
+  }
+  if (blob?.type && mimeExtMap[blob.type]) return mimeExtMap[blob.type]
+
+  const cleanSrc = src.split(/[?#]/)[0]
+  const extMatch = cleanSrc.match(/\.([a-z0-9]+)$/i)
+  return extMatch?.[1]?.toLowerCase() || 'jpg'
+}
+
+const getImageBaseName = (src: string, index: number) => {
+  try {
+    const url = src.startsWith('data:') ? null : new URL(src, window.location.href)
+    const fileName = url?.pathname.split('/').filter(Boolean).pop()
+    if (fileName) {
+      return sanitizeFileName(fileName.replace(/\.[a-z0-9]+$/i, ''))
+    }
+  } catch {
+    // Ignore malformed paths and fall through to a generated name.
+  }
+  return `image_${String(index + 1).padStart(3, '0')}`
+}
+
+const resolveImageUrl = (src: string, baseURL: string) => {
+  if (src.startsWith('data:')) return src
+  if (/^https?:\/\//i.test(src)) return src
+  if (src.startsWith('/')) return `${baseURL}${src}`
+  return new URL(src, window.location.href).toString()
+}
+
+const downloadBlob = (blob: Blob, fileName: string) => {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+const normalizeExportedMarkdownImages = (markdown: string) =>
+  markdown
+    .replace(/^[\uFFFC\uFFFD\uFEFF\\\s]+(!\[[^\]]*\]\([^)]+\))\s*$/gm, '$1')
+    .replace(/\\(!\[[^\]]*\]\([^)]+\))/g, '$1')
+    .replace(/([^\n])(!\[[^\]]*\]\([^)]+\))/g, '$1\n\n$2')
+    .replace(/(!\[[^\]]*\]\([^)]+\))([^\n])/g, '$1\n\n$2')
+    .replace(/\n{3,}/g, '\n\n')
 
 /**
  * 构建 ReactMarkdown components 对象，baseURL 用于修正图片路径。
@@ -110,7 +208,7 @@ function createMarkdownComponents(baseURL: string) {
               href={href}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 rounded-full bg-blue-50 px-3 py-1 text-sm font-medium text-blue-700 transition-colors hover:bg-blue-100"
+              className="inline-flex items-center gap-1.5 rounded-full bg-neutral-100 px-3 py-1 text-sm font-medium text-neutral-800 transition-colors hover:bg-neutral-200"
               {...props}
             >
               <Play className="h-3.5 w-3.5" />
@@ -316,12 +414,12 @@ function createMarkdownComponents(baseURL: string) {
 }
 
 const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
-  const [copied, setCopied] = useState(false)
   const [currentVerId, setCurrentVerId] = useState<string>('')
   const [selectedContent, setSelectedContent] = useState<string>('')
   const [modelName, setModelName] = useState<string>('')
   const [style, setStyle] = useState<string>('')
   const [createTime, setCreateTime] = useState<string>('')
+  const [isExporting, setIsExporting] = useState(false)
   // 确保baseURL没有尾部斜杠
   const baseURL = (String(import.meta.env.VITE_API_BASE_URL || '').replace('/api','') || '').replace(/\/$/, '')
   const getCurrentTask = useTaskStore.getState().getCurrentTask
@@ -329,11 +427,18 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const taskStatus = currentTask?.status || 'PENDING'
   const taskMessage = currentTask?.message
   const retryTask = useTaskStore.getState().retryTask
-  const isMultiVersion = Array.isArray(currentTask?.markdown)
+  const currentMarkdown = currentTask?.markdown
+  const isMultiVersion = Array.isArray(currentMarkdown)
+  const markdownVersions = useMemo(
+    () => (Array.isArray(currentMarkdown) ? currentMarkdown : []),
+    [currentMarkdown],
+  )
+  const currentFormData = currentTask?.formData
+  const currentCreatedAt = currentTask?.createdAt
   const [showTranscribe, setShowTranscribe] = useState(false)
   const [showChat, setShowChat] = useState<false | 'half' | 'full'>(false)
   const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
-  const svgRef = useRef<SVGSVGElement>(null)
+  const isTaskRunning = currentTask && !['SUCCESS', 'FAILED'].includes(taskStatus)
 
   // 缓存 ReactMarkdown components，仅在 baseURL 变化时重建
   const markdownComponents = useMemo(() => createMarkdownComponents(baseURL), [baseURL])
@@ -344,12 +449,12 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
 
     if (!isMultiVersion) {
       setCurrentVerId('') // 清空旧版本 ID
-      setModelName(currentTask.formData.model_name)
-      setStyle(currentTask.formData.style)
-      setCreateTime(currentTask.createdAt)
-      setSelectedContent(currentTask?.markdown)
+      setModelName(currentFormData?.model_name || '')
+      setStyle(currentFormData?.style || '')
+      setCreateTime(currentCreatedAt || '')
+      setSelectedContent(typeof currentMarkdown === 'string' ? currentMarkdown : '')
     } else {
-      const latestVersion = [...currentTask.markdown].sort(
+      const latestVersion = [...markdownVersions].sort(
         (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
       )[0]
 
@@ -357,77 +462,156 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         setCurrentVerId(latestVersion.ver_id)
       }
     }
-  }, [currentTask?.id, taskStatus])
+  }, [
+    currentTask,
+    currentMarkdown,
+    currentFormData,
+    currentCreatedAt,
+    isMultiVersion,
+    markdownVersions,
+    taskStatus,
+  ])
   useEffect(() => {
     if (!currentTask || !isMultiVersion) return
 
-    const currentVer = currentTask.markdown.find(v => v.ver_id === currentVerId)
+    const currentVer = markdownVersions.find(v => v.ver_id === currentVerId)
     if (currentVer) {
       setModelName(currentVer.model_name)
       setStyle(currentVer.style)
       setCreateTime(currentVer.created_at || '')
       setSelectedContent(currentVer.content)
     }
-  }, [currentVerId, currentTask?.id])
+  }, [currentTask, currentVerId, isMultiVersion, markdownVersions])
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(selectedContent)
-      setCopied(true)
       toast.success('已复制到剪贴板')
-      setTimeout(() => setCopied(false), 2000)
     } catch (e) {
       toast.error('复制失败')
     }
   }
-  const alertButton = {
-    id: 'alert',
-    title: '测试警告',
-    content: '⚠️',
-    onClick: () => alert('你点击了自定义按钮！'),
-  }
-  const exportButton = {
-    id: 'export',
-    title: '导出思维导图',
-    content: '⤓',
-    onClick: () => {
-      const svgEl = svgRef.current
-      if (!svgEl) return
-      // 同上面的序列化逻辑
-      const serializer = new XMLSerializer()
-      const source = serializer.serializeToString(svgEl)
-      const blob = new Blob(['<?xml version="1.0" encoding="UTF-8"?>', source], {
-        type: 'image/svg+xml;charset=utf-8',
-      })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = 'mindmap.svg'
-      a.click()
-      URL.revokeObjectURL(url)
-    },
-  }
-  const handleDownload = () => {
+  const handleDownload = async () => {
     const task = getCurrentTask()
-    const name = task?.audioMeta.title || 'note'
-    const blob = new Blob([selectedContent], { type: 'text/markdown;charset=utf-8' })
-    const link = document.createElement('a')
-    link.href = URL.createObjectURL(blob)
-    link.download = `${name}.md`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
+    const name = sanitizeFileName(task?.audioMeta.title || 'note')
+    const images: Array<{ src: string; alt: string }> = []
+    const normalizedContent = normalizeBrokenImageSyntax(selectedContent)
+
+    const markdownWithPlaceholders = normalizedContent.replace(
+      markdownImagePattern,
+      (match, altText: string, rawSrc: string) => {
+        const src = cleanMarkdownImageSrc(rawSrc)
+        if (!src) return match
+        const index = images.push({ src, alt: altText || '' }) - 1
+        return `![${altText || ''}](__VIDEONOTE_IMAGE_${index}__)`
+      },
+    )
+
+    if (images.length === 0) {
+      const blob = new Blob([normalizedContent], { type: 'text/markdown;charset=utf-8' })
+      downloadBlob(blob, `${name}.md`)
+      toast.success('Markdown 已导出')
+      return
+    }
+
+    setIsExporting(true)
+    const toastId = `export-${task?.id || name}`
+    toast.loading('正在打包 Markdown 和图片...', { id: toastId })
+
+    try {
+      const zip = new JSZip()
+      const imageFolder = zip.folder('images')
+      const localImagePaths: string[] = []
+      const inlineImagePaths: string[] = []
+
+      await Promise.all(
+        images.map(async (image, index) => {
+          const imageUrl = resolveImageUrl(image.src, baseURL)
+          try {
+            let blob: Blob | null = null
+
+            if (imageUrl.startsWith('data:')) {
+              blob = dataUriToBlob(imageUrl)
+            } else {
+              const response = await fetch(imageUrl)
+              if (!response.ok) {
+                throw new Error(`图片下载失败：${image.src}`)
+              }
+              blob = await response.blob()
+            }
+
+            if (!blob) {
+              throw new Error(`图片解析失败：${image.src}`)
+            }
+
+            const extension = getImageExtension(imageUrl, blob)
+            const baseName = getImageBaseName(imageUrl, index)
+            const fileName = `${baseName}.${extension}`
+            imageFolder?.file(fileName, blob)
+            localImagePaths[index] = `images/${fileName}`
+            inlineImagePaths[index] = await blobToDataUri(blob)
+          } catch (error) {
+            console.warn('图片打包失败，保留原始链接：', image.src, error)
+            localImagePaths[index] = imageUrl
+            inlineImagePaths[index] = imageUrl
+          }
+        }),
+      )
+
+      const markdownWithImages = localImagePaths.reduce(
+        (markdown, imageData, index) =>
+          markdown.replace(`__VIDEONOTE_IMAGE_${index}__`, imageData || images[index].src),
+        markdownWithPlaceholders,
+      )
+      const markdownWithInlineImages = inlineImagePaths.reduce(
+        (markdown, imageData, index) =>
+          markdown.replace(`__VIDEONOTE_IMAGE_${index}__`, imageData || images[index].src),
+        markdownWithPlaceholders,
+      )
+      zip.file('note.md', normalizeExportedMarkdownImages(markdownWithImages))
+      zip.file('note-inline.md', normalizeExportedMarkdownImages(markdownWithInlineImages))
+      zip.file(
+        'README.txt',
+        [
+          'VideoNote Markdown 导出说明',
+          '',
+          '1. 推荐：先解压整个 zip，再打开 note.md。note.md 依赖同级 images 文件夹。',
+          '2. 如果你的 Markdown 软件没有显示图片，请打开 note-inline.md，它把图片直接写进 Markdown 文件。',
+          '3. 不要只从压缩包里单独拖出 note.md，否则 images 文件夹不会跟着一起出来。',
+          '',
+        ].join('\n'),
+      )
+      const zipBlob = await zip.generateAsync({ type: 'blob' })
+      downloadBlob(zipBlob, `${name}.zip`)
+
+      toast.success(`已导出 Markdown 图片包（${images.length} 张图，含内嵌版）`, { id: toastId })
+    } catch (error) {
+      console.error('导出失败:', error)
+      toast.error(error instanceof Error ? error.message : '导出失败，请稍后重试', { id: toastId })
+    } finally {
+      setIsExporting(false)
+    }
   }
 
   if (status === 'loading') {
     return (
-      <div className="flex h-screen w-full flex-col items-center justify-center space-y-4 text-neutral-500">
-        <StepBar steps={steps} currentStep={taskStatus} />
-        <Loading className="h-5 w-5" />
-        <div className="text-center text-sm">
-          <p className="text-lg font-bold">正在生成笔记，请稍候…</p>
-          <p className="mt-2 text-xs text-neutral-500">
-            {taskMessage || '这可能需要几秒到几分钟，取决于视频长度'}
-          </p>
+      <div className="flex h-full w-full items-center justify-center bg-neutral-50 p-8 text-neutral-600">
+        <div className="w-full max-w-2xl rounded-lg border border-neutral-200 bg-white p-8 shadow-sm">
+          <div className="mb-6 flex items-start gap-4">
+            <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-neutral-950 text-white">
+              <Sparkles className="h-5 w-5" />
+            </div>
+            <div>
+              <p className="text-lg font-semibold text-neutral-950">正在生成 VideoNote</p>
+              <p className="mt-1 text-sm text-neutral-500">
+                {taskMessage || '正在解析视频内容，长视频会需要更久一些'}
+              </p>
+            </div>
+          </div>
+          <StepBar steps={steps} currentStep={taskStatus} />
+          <div className="mt-6 flex items-center gap-2 text-sm text-neutral-500">
+            <Loading className="h-5 w-5" />
+            <span>笔记正文会优先生成，关键截图随后异步补齐。</span>
+          </div>
         </div>
       </div>
     )
@@ -435,11 +619,20 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
 
   if (status === 'idle') {
     return (
-      <div className="flex h-screen w-full flex-col items-center justify-center space-y-3 text-neutral-500">
-        <Idle />
-        <div className="text-center">
-          <p className="text-lg font-bold">输入视频链接并点击"生成笔记"</p>
-          <p className="mt-2 text-xs text-neutral-500">支持哔哩哔哩、YouTube 、抖音等视频平台</p>
+      <div className="flex h-full w-full items-center justify-center bg-neutral-50 p-8">
+        <div className="max-w-xl text-center">
+          <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-lg border border-neutral-200 bg-white shadow-sm">
+            <FileText className="h-7 w-7 text-neutral-700" />
+          </div>
+          <p className="text-xl font-semibold text-neutral-950">准备生成第一篇视频笔记</p>
+          <p className="mx-auto mt-3 max-w-md text-sm leading-6 text-neutral-500">
+            在左侧粘贴视频链接或选择本地视频。VideoNote 会先整理成 Markdown，再为关键段落补上有用截图。
+          </p>
+          <div className="mt-6 grid grid-cols-3 gap-2 text-xs text-neutral-600">
+            <div className="rounded-md border border-neutral-200 bg-white px-3 py-2">转写</div>
+            <div className="rounded-md border border-neutral-200 bg-white px-3 py-2">总结</div>
+            <div className="rounded-md border border-neutral-200 bg-white px-3 py-2">配图</div>
+          </div>
         </div>
       </div>
     )
@@ -447,7 +640,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
 
   if (status === 'failed' && !isMultiVersion) {
     return (
-      <div className="flex h-screen w-full flex-col items-center justify-center gap-4 space-y-3">
+      <div className="flex h-full w-full flex-col items-center justify-center gap-4 bg-neutral-50 p-8">
         <Error />
         <div className="text-center">
           <p className="text-lg font-bold text-red-500">笔记生成失败</p>
@@ -462,7 +655,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   }
 
   return (
-    <div className="flex h-screen w-full flex-col overflow-hidden">
+    <div className="flex h-full w-full flex-col overflow-hidden bg-white">
       <MarkdownHeader
         currentTask={currentTask}
         isMultiVersion={isMultiVersion}
@@ -473,6 +666,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         noteStyles={noteStyles}
         onCopy={handleCopy}
         onDownload={handleDownload}
+        isExporting={isExporting}
         createAt={createTime}
         showTranscribe={showTranscribe}
         setShowTranscribe={setShowTranscribe}
@@ -480,6 +674,8 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         setShowChat={setShowChat}
         viewMode={viewMode}
         setViewMode={setViewMode}
+        isTaskRunning={Boolean(isTaskRunning)}
+        taskStatus={taskStatus}
       />
 
       {viewMode === 'map' ? (
@@ -494,7 +690,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
           </div>
         </div>
       ) : (
-        <div className="flex flex-1 overflow-hidden bg-white py-2">
+        <div className="flex flex-1 overflow-hidden bg-white">
           {selectedContent && selectedContent !== 'loading' && selectedContent !== 'empty' ? (
             <>
               {showChat === 'full' && currentTask ? (
@@ -502,51 +698,57 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                   <ChatPanel taskId={currentTask.id} mode="full" onModeChange={setShowChat} />
                 </div>
               ) : (
-	              <>
-	              <ScrollArea className="min-w-0 flex-1">
-	                {taskStatus === 'ENHANCING' && (
-	                  <div className="sticky top-0 z-10 border-b bg-blue-50 px-4 py-2 text-sm text-blue-700">
-	                    {taskMessage || '正在逐张插入关键截图，笔记内容会自动更新'}
-	                  </div>
-	                )}
-	                <div className="px-2">
-	                  <VideoBanner
-                    audioMeta={currentTask?.audioMeta}
-                    videoUrl={currentTask?.formData?.video_url}
-                  />
-                </div>
-                <div className={'markdown-body w-full px-2'}>
-                  <ReactMarkdown
-                    remarkPlugins={remarkPlugins}
-                    rehypePlugins={rehypePlugins}
-                    components={markdownComponents}
-                  >
-                    {selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, '')}
-                  </ReactMarkdown>
-                </div>
-              </ScrollArea>
-              {showTranscribe && (
-                <div className={'ml-2 w-2/4'}>
-                  <TranscriptViewer />
-                </div>
-              )}
-              {/* 侧边问答模式：markdown + ChatPanel 各占一半 */}
-              {showChat === 'half' && currentTask && (
-                <div className="ml-2 h-full w-1/2 shrink-0">
-                  <ChatPanel taskId={currentTask.id} mode="half" onModeChange={setShowChat} />
-                </div>
-              )}
-              </>
+                <>
+                  <ScrollArea className="min-w-0 flex-1">
+                    {isTaskRunning && (
+                      <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-5 py-2 text-sm text-amber-800">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        <span>
+                          {taskMessage ||
+                            (taskStatus === 'ENHANCING'
+                              ? '正在逐张插入关键截图，笔记内容会自动更新'
+                              : '正在重新生成，旧笔记会保留到新版本完成')}
+                        </span>
+                      </div>
+                    )}
+                    <div className="px-5 pt-5">
+                      <VideoBanner
+                        audioMeta={currentTask?.audioMeta}
+                        videoUrl={currentTask?.formData?.video_url}
+                      />
+                    </div>
+                    <div className="markdown-body mx-auto w-full max-w-5xl px-5 pb-10">
+                      <ReactMarkdown
+                        remarkPlugins={remarkPlugins}
+                        rehypePlugins={rehypePlugins}
+                        components={markdownComponents}
+                      >
+                        {selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, '')}
+                      </ReactMarkdown>
+                    </div>
+                  </ScrollArea>
+                  {showTranscribe && (
+                    <div className="ml-2 w-2/4">
+                      <TranscriptViewer />
+                    </div>
+                  )}
+                  {/* 侧边问答模式：markdown + ChatPanel 各占一半 */}
+                  {showChat === 'half' && currentTask && (
+                    <div className="ml-2 h-full w-1/2 shrink-0">
+                      <ChatPanel taskId={currentTask.id} mode="half" onModeChange={setShowChat} />
+                    </div>
+                  )}
+                </>
               )}
             </>
           ) : (
-            <div className="flex h-full w-full items-center justify-center">
-              <div className="w-[300px] flex-col justify-items-center">
-                <div className="bg-primary-light mb-4 flex h-16 w-16 items-center justify-center rounded-full">
-                  <ArrowRight className="text-primary h-8 w-8" />
+            <div className="flex h-full w-full items-center justify-center bg-neutral-50">
+              <div className="w-[320px] flex-col justify-items-center text-center">
+                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-lg border border-neutral-200 bg-white shadow-sm">
+                  <ArrowRight className="h-8 w-8 text-neutral-700" />
                 </div>
-                <p className="mb-2 text-neutral-600">输入视频链接并点击"生成笔记"按钮</p>
-                <p className="text-xs text-neutral-500">支持哔哩哔哩、YouTube等视频网站</p>
+                <p className="mb-2 font-medium text-neutral-800">从左侧开始创建笔记</p>
+                <p className="text-xs leading-5 text-neutral-500">支持主流视频平台和本地视频</p>
               </div>
             </div>
           )}

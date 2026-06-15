@@ -28,6 +28,6 @@ tauri-plugin-log = "2"
 tauri-plugin-shell = "2"
 
 [package.metadata.tauri.bundle.macOS]
-frameworks = ["bin/BiliNoteBackend/_internal/"]
+frameworks = ["bin/VideoNoteBackend/_internal/"]
 
 

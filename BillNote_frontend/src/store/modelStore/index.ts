@@ -30,7 +30,7 @@ interface ModelStore {
   loading: boolean
   selectedModel: string
 
-  loadModels: (providerId: string) => Promise<void>
+  loadModels: (providerId: string, opts?: { silent?: boolean }) => Promise<IModel[]>
   loadModelsById: (providerId: string) => Promise<IModelListItem[]>
   loadEnabledModels: () => Promise<void>
   addNewModel: (providerId: string, modelId: string) => Promise<void>
@@ -59,10 +59,10 @@ export const useModelStore = create<ModelStore>()(
       }
     },
 
-    loadModels: async (providerId: string) => {
+    loadModels: async (providerId: string, opts?: { silent?: boolean }) => {
       try {
         set({ loading: true })
-        const res = await fetchModels(providerId)
+        const res = await fetchModels(providerId, opts)
 
         let models: IModel[] = []
         if (Array.isArray(res?.models)) {
@@ -72,9 +72,11 @@ export const useModelStore = create<ModelStore>()(
         }
 
         set({ models })
+        return models
       } catch (error) {
         set({ models: [] })
         console.error('加载模型列表失败', error)
+        return []
       } finally {
         set({ loading: false })
       }

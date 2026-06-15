@@ -38,7 +38,7 @@ REM 步骤 2: 执行 PyInstaller 打包，直接添加已存在的 .env 文件
 echo 开始 PyInstaller 打包...
 "%PYTHON_EXE%" -m PyInstaller ^
   -y ^
-  --name BiliNoteBackend ^
+  --name VideoNoteBackend ^
   --paths backend ^
   --distpath BillNote_frontend\src-tauri\bin ^
   --workpath backend\build ^
@@ -58,11 +58,11 @@ REM --- 核心修改部分结束 ---
 
 
 REM 重命名生成的可执行文件为符合 Tauri 要求的名称
-move /Y BillNote_frontend\src-tauri\bin\BiliNoteBackend\BiliNoteBackend.exe BillNote_frontend\src-tauri\bin\BiliNoteBackend\BiliNoteBackend-%TARGET_TRIPLE%.exe
+move /Y BillNote_frontend\src-tauri\bin\VideoNoteBackend\VideoNoteBackend.exe BillNote_frontend\src-tauri\bin\VideoNoteBackend\VideoNoteBackend-%TARGET_TRIPLE%.exe
 
 echo PyInstaller 打包完成：
-dir BillNote_frontend\src-tauri\bin\BiliNoteBackend
+dir BillNote_frontend\src-tauri\bin\VideoNoteBackend
 
-echo 请检查 BillNote_frontend\src-tauri\bin\BiliNoteBackend 目录，确认其中包含了名为 .env 的【文件】。
+echo 请检查 BillNote_frontend\src-tauri\bin\VideoNoteBackend 目录，确认其中包含了名为 .env 的【文件】。
 
 endlocal

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useModelStore } from '@/store/modelStore'
 import { Input } from '@/components/ui/input'
 import {
@@ -13,10 +13,17 @@ import toast from 'react-hot-toast'
 
 interface ModelSelectorProps {
   providerId: string
+  disabled?: boolean
+  disabledMessage?: string
   onModelSaved?: () => void | Promise<void>
 }
 
-export function ModelSelector({ providerId, onModelSaved }: ModelSelectorProps) {
+export function ModelSelector({
+  providerId,
+  disabled = false,
+  disabledMessage,
+  onModelSaved,
+}: ModelSelectorProps) {
   const { models, loading, selectedModel, loadModels, setSelectedModel, addNewModel } =
     useModelStore()
   const [search, setSearch] = useState('')
@@ -29,12 +36,27 @@ export function ModelSelector({ providerId, onModelSaved }: ModelSelectorProps) 
   })
 
   useEffect(() => {
-    if (providerId) {
-      loadModels(providerId)
+    setSelectedModel('')
+  }, [providerId, setSelectedModel])
+
+  const handleLoadModels = async () => {
+    if (disabled) {
+      toast.error(disabledMessage || '请先完成供应商配置')
+      return
     }
-  }, [providerId, loadModels])
+    const loadedModels = await loadModels(providerId, { silent: true })
+    if (loadedModels.length > 0) {
+      toast.success('模型列表加载成功')
+    } else {
+      toast.error('未获取到模型列表，请检查供应商配置')
+    }
+  }
 
   const handleSubmit = async () => {
+    if (disabled) {
+      toast.error(disabledMessage || '请先完成供应商配置')
+      return
+    }
     if (!selectedModel) {
       toast.error('请选择一个模型')
       return
@@ -52,21 +74,25 @@ export function ModelSelector({ providerId, onModelSaved }: ModelSelectorProps) 
   }
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-center gap-2 font-bold">
-        <span>选择模型</span>
+    <div className="grid gap-2">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold text-neutral-950">选择模型</div>
+          <div className="text-xs text-neutral-500">刷新后选择需要启用的模型。</div>
+        </div>
         <Button
-          variant="ghost"
+          variant="outline"
+          size="sm"
           type="button"
-          onClick={() => loadModels(providerId)}
-          disabled={loading}
+          onClick={handleLoadModels}
+          disabled={loading || disabled}
         >
           {loading ? '加载中...' : '刷新模型'}
         </Button>
       </div>
 
       <Select value={selectedModel} onValueChange={setSelectedModel}>
-        <SelectTrigger className="w-[300px]">
+        <SelectTrigger className="h-9 w-full">
           <SelectValue placeholder="请选择模型" />
         </SelectTrigger>
         <SelectContent>
@@ -78,15 +104,30 @@ export function ModelSelector({ providerId, onModelSaved }: ModelSelectorProps) 
               className="h-8"
             />
           </div>
-          {filteredModels.map((model, index) => (
-            <SelectItem key={`${model.id}-${index}`} value={model.id}>
-              {model.id}
-            </SelectItem>
-          ))}
+          {filteredModels.length > 0 ? (
+            filteredModels.map((model, index) => (
+              <SelectItem key={`${model.id}-${index}`} value={model.id}>
+                {model.id}
+              </SelectItem>
+            ))
+          ) : (
+            <div className="px-3 py-2 text-sm text-neutral-500">暂无可选模型</div>
+          )}
         </SelectContent>
       </Select>
 
-      <Button onClick={handleSubmit} disabled={submitting || !selectedModel}>
+      {disabledMessage && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs leading-5 text-amber-800">
+          {disabledMessage}
+        </div>
+      )}
+
+      <Button
+        type="button"
+        onClick={handleSubmit}
+        disabled={disabled || submitting || !selectedModel}
+        className="h-9 rounded-md bg-neutral-950 text-white hover:bg-neutral-800"
+      >
         {submitting ? '保存中...' : '保存模型'}
       </Button>
     </div>

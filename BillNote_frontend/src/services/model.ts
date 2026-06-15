@@ -23,8 +23,8 @@ export const testConnection = async (data: any, opts?: CallOpts) => {
   return await request.post('/connect_test', data, cfg(opts))
 }
 
-export const fetchModels = async (providerId: string) => {
-  return await request.get('/model_list/' + providerId)
+export const fetchModels = async (providerId: string, opts?: CallOpts) => {
+  return await request.get('/model_list/' + providerId, cfg(opts))
 }
 
 export const fetchEnableModelById = async (id: string) => {

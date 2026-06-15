@@ -176,7 +176,7 @@ onUnmounted(() => {
   <main class="w-[400px] p-3 text-sm text-gray-800 flex flex-col gap-3 bg-white">
     <header class="flex items-center justify-between">
       <div class="flex items-center gap-2">
-        <span class="font-semibold text-base">BiliNote</span>
+        <span class="font-semibold text-base">VideoNote</span>
         <PlatformBadge :platform="platform" />
       </div>
       <button class="text-xs text-gray-500 hover:text-gray-800" @click="openOptions">设置</button>
@@ -187,7 +187,7 @@ onUnmounted(() => {
     </div>
 
     <div v-if="!supported" class="text-xs text-amber-700 bg-amber-50 p-2 rounded">
-      当前页面不是 BiliNote 支持的视频链接（Bilibili / YouTube / Douyin / Kuaishou）
+      当前页面不是 VideoNote 支持的视频链接（Bilibili / YouTube / Douyin / Kuaishou）
     </div>
 
     <fieldset class="border rounded p-2 flex flex-col gap-2" :disabled="!supported || submitting">

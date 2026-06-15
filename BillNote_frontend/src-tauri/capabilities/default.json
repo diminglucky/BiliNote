@@ -9,7 +9,7 @@
       "identifier": "shell:allow-execute",
       "allow": [
         {
-          "name": "BiliNoteBackend",
+          "name": "VideoNoteBackend",
           "sidecar": true
         }
       ]

@@ -1,0 +1,12 @@
+VideoNote Notice
+================
+
+VideoNote is developed as a customized video note workspace.
+
+This repository includes work derived from the open-source BiliNote project by
+Jeffery Huang, licensed under the MIT License. The original MIT copyright
+notice is preserved in LICENSE as required by the license.
+
+Major custom work in this repository includes product rebranding, workflow
+adjustments, screenshot selection and visual enhancement logic, frontend user
+experience changes, and local deployment refinements.

@@ -8,7 +8,7 @@ const platform = detectPlatform(window.location.href)
 const busy = ref(false)
 const toast = ref<{ kind: 'ok' | 'err', text: string } | null>(null)
 
-const label = computed(() => platform ? `用 BiliNote 总结这个${PLATFORM_LABELS[platform]}视频` : '')
+const label = computed(() => platform ? `用 VideoNote 总结这个${PLATFORM_LABELS[platform]}视频` : '')
 
 async function trigger() {
   if (!platform || busy.value)
@@ -52,7 +52,7 @@ async function trigger() {
       @click="trigger"
     >
       <span class="text-base">📝</span>
-      <span>{{ busy ? '提交中…' : 'BiliNote' }}</span>
+      <span>{{ busy ? '提交中…' : 'VideoNote' }}</span>
     </button>
   </div>
 </template>

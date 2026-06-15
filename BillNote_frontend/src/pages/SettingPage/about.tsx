@@ -1,244 +1,146 @@
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Github, Star, ExternalLink, Download } from 'lucide-react'
 import { ScrollArea } from '@/components/ui/scroll-area.tsx'
 import logo from '@/assets/icon.svg'
 
-// 二维码统一走 GitHub 在线地址：后续在仓库替换图片后，已打包的 App 会自动更新，无需重新发版
-const GITHUB_DOC_RAW = 'https://raw.githubusercontent.com/JefferyHcool/BiliNote/master/doc'
-const wechatQr = `${GITHUB_DOC_RAW}/wechat-group-1.png`
-const remoteInstallQr = `${GITHUB_DOC_RAW}/remote-install-wechat.png`
+const features = [
+  {
+    title: '深度笔记生成',
+    desc: '围绕视频结构、转写文本和关键知识点生成 Markdown 笔记，减少流水账式摘要。',
+  },
+  {
+    title: '关键截图增强',
+    desc: '按笔记内容反推截图位置，过滤空白页、结束页和无关画面，让图片真正服务笔记。',
+  },
+  {
+    title: '异步视觉流程',
+    desc: '先交付可阅读笔记，再逐步插入图片，用户可以看到处理进度，不必一直盯着等待。',
+  },
+  {
+    title: '多平台输入',
+    desc: '支持 Bilibili、YouTube、抖音、快手和本地视频，适合课程、教程和长视频整理。',
+  },
+  {
+    title: '多模型配置',
+    desc: '可接入 OpenAI 兼容供应商、本地转写模型和在线转写服务，按速度与成本自由组合。',
+  },
+  {
+    title: '知识复用',
+    desc: '生成后的笔记可导出、生成思维导图，并支持基于笔记内容的问答检索。',
+  },
+]
 
 export default function AboutPage() {
   const appVersion = __APP_VERSION__
-  const images = [
-    'https://common-1304618721.cos.ap-chengdu.myqcloud.com/20250504102850.png',
-    'https://common-1304618721.cos.ap-chengdu.myqcloud.com/20250504103028.png',
-    'https://common-1304618721.cos.ap-chengdu.myqcloud.com/20250504103304.png',
-    'https://common-1304618721.cos.ap-chengdu.myqcloud.com/20250504103625.png',
-  ]
+
   return (
-    <ScrollArea className={'h-full overflow-y-auto bg-white'}>
-      <div className="container mx-auto px-4 py-12">
-        {/* Hero Section */}
-        <div className="mb-16 flex flex-col items-center justify-center text-center">
-          <div className="mb-4 flex items-center gap-4">
-            <img
-              src={logo}
-              alt="BiliNote Logo"
-              width={50}
-              height={50}
-              className="rounded-lg"
-            />
-            <h1 className="text-4xl font-bold">BiliNote v{appVersion}</h1>
-          </div>
-          <p className="text-muted-foreground mb-6 text-xl italic">
-            AI 视频笔记生成工具 让 AI 为你的视频做笔记
-          </p>
-
-          <div className="mb-8 flex flex-wrap justify-center gap-2">
-            <Badge variant="secondary">MIT License</Badge>
-            <Badge variant="secondary">React</Badge>
-            <Badge variant="secondary">FastAPI</Badge>
-            <Badge variant="secondary">Docker Compose</Badge>
-            <Badge variant="secondary">Active</Badge>
-          </div>
-
-          <div className="flex flex-wrap justify-center gap-4">
-            <Button asChild>
-              <a href="https://www.bilinote.app" target="_blank">
-                <ExternalLink className="mr-2 h-4 w-4" />
-                体验 BiliNote
-              </a>
-            </Button>
-            <Button variant="outline" asChild>
-              <a href="https://github.com/JefferyHcool/BiliNote" target="_blank">
-                <Github className="mr-2 h-4 w-4" />
-                GitHub 仓库
-              </a>
-            </Button>
-            <Button variant="outline" asChild>
-              <a href="https://github.com/JefferyHcool/BiliNote/releases" target="_blank">
-                <Download className="mr-2 h-4 w-4" />
-                下载桌面版
-              </a>
-            </Button>
-          </div>
-        </div>
-
-        {/* Project Introduction */}
-        <section className="mb-16">
-          <h2 className="mb-6 text-center text-3xl font-bold">✨ 项目简介</h2>
-          <div className="mx-auto max-w-3xl text-center">
-            <p className="text-lg">
-              BiliNote 是一个开源的 AI 视频笔记助手，支持通过哔哩哔哩、YouTube、抖音等视频链接，
-              自动提取内容并生成结构清晰、重点明确的 Markdown
-              格式笔记。支持插入截图、原片跳转等功能。
-            </p>
+    <ScrollArea className="h-full overflow-y-auto bg-white">
+      <div className="mx-auto max-w-6xl px-6 py-10">
+        <section className="mb-10 border-b border-neutral-200 pb-8">
+          <div className="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
+            <div className="max-w-3xl">
+              <div className="mb-5 flex items-center gap-3">
+                <img src={logo} alt="VideoNote Logo" width={48} height={48} className="rounded-lg" />
+                <div>
+                  <h1 className="text-4xl font-semibold tracking-normal text-neutral-950">
+                    VideoNote
+                  </h1>
+                  <p className="text-sm text-neutral-500">v{appVersion}</p>
+                </div>
+              </div>
+              <p className="text-xl leading-8 text-neutral-700">
+                面向视频学习的 AI 笔记工作台。VideoNote 会把视频链接、本地视频、转写文本和关键画面整理成可复用的结构化笔记。
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2 md:justify-end">
+              <Badge variant="secondary">React</Badge>
+              <Badge variant="secondary">FastAPI</Badge>
+              <Badge variant="secondary">LangGraph</Badge>
+              <Badge variant="secondary">Markdown</Badge>
+              <Badge variant="secondary">MIT License</Badge>
+            </div>
           </div>
         </section>
 
-        {/* Features Section */}
-        <section className="mb-16">
-          <h2 className="mb-8 text-center text-3xl font-bold">🔧 功能特性</h2>
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {[
-              { title: '多平台支持', desc: '支持 Bilibili、YouTube、本地视频、抖音等多个平台' },
-              { title: '笔记格式选择', desc: '支持返回多种笔记格式，满足不同需求' },
-              { title: '笔记风格选择', desc: '支持多种笔记风格，个性化定制' },
-              { title: '多模态视频理解', desc: '结合视觉和音频内容，全面理解视频' },
-              { title: '自定义 GPT 配置', desc: '支持自行配置 GPT 大模型' },
-              { title: '本地音频转写', desc: '支持 Fast-Whisper 等本地模型音频转写' },
-              { title: '结构化笔记', desc: '自动生成结构化 Markdown 笔记' },
-              { title: '智能截图', desc: '可选插入自动截取的关键画面' },
-              { title: '内容跳转', desc: '支持关联原视频的内容跳转链接' },
-            ].map((feature, index) => (
-              <Card key={index} className="h-full">
-                <CardContent className="pt-2">
-                  <h3 className="mb-2 text-xl font-semibold">{feature.title}</h3>
-                  <p className="text-muted-foreground">{feature.desc}</p>
+        <section className="mb-10">
+          <h2 className="mb-4 text-2xl font-semibold text-neutral-950">项目定位</h2>
+          <div className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
+            <Card>
+              <CardContent className="space-y-4 p-6 text-sm leading-7 text-neutral-700">
+                <p>
+                  VideoNote 不是简单的截图工具，也不是只把字幕交给模型总结。它的目标是先形成完整笔记，再根据笔记段落寻找真正有用的画面，让图文组合能直接进入学习资料。
+                </p>
+                <p>
+                  当前版本重点强化了截图 agent 的选择逻辑、并发控制、失败隔离和前端任务反馈，减少长视频处理时的卡顿感和无关图片。
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-6">
+                <div className="grid gap-4 text-sm">
+                  <div>
+                    <div className="text-neutral-500">默认后端</div>
+                    <div className="font-medium text-neutral-950">http://127.0.0.1:8483</div>
+                  </div>
+                  <div>
+                    <div className="text-neutral-500">默认前端</div>
+                    <div className="font-medium text-neutral-950">http://127.0.0.1:3015</div>
+                  </div>
+                  <div>
+                    <div className="text-neutral-500">核心输出</div>
+                    <div className="font-medium text-neutral-950">Markdown 笔记 + 关键截图 + 思维导图</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </section>
+
+        <section className="mb-10">
+          <h2 className="mb-4 text-2xl font-semibold text-neutral-950">核心能力</h2>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {features.map(feature => (
+              <Card key={feature.title} className="h-full">
+                <CardContent className="p-5">
+                  <h3 className="mb-2 text-base font-semibold text-neutral-950">{feature.title}</h3>
+                  <p className="text-sm leading-6 text-neutral-600">{feature.desc}</p>
                 </CardContent>
               </Card>
             ))}
           </div>
         </section>
 
-        {/* Screenshots Section */}
-        <section className="mb-16">
-          <h2 className="mb-8 text-center text-3xl font-bold">📸 截图预览</h2>
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-            {images.map(num => (
-              <div key={num} className="overflow-hidden rounded-lg border shadow-sm">
-                <img
-                  src={num}
-                  alt={`BiliNote Screenshot ${num}`}
-                  width={600}
-                  height={400}
-                  className="w-full object-cover transition-transform hover:scale-105"
-                />
-              </div>
-            ))}
-          </div>
-        </section>
-
-        {/* Quick Start Section */}
-        <section className="mb-16">
-          <h2 className="mb-8 text-center text-3xl font-bold">🚀 快速开始</h2>
-          <Tabs defaultValue="manual" className="mx-auto max-w-3xl">
+        <section>
+          <h2 className="mb-4 text-2xl font-semibold text-neutral-950">本地启动</h2>
+          <Tabs defaultValue="manual" className="max-w-3xl">
             <TabsList className="grid w-full grid-cols-2">
-              <TabsTrigger value="manual">手动安装</TabsTrigger>
-              <TabsTrigger value="docker">Docker 部署</TabsTrigger>
+              <TabsTrigger value="manual">手动启动</TabsTrigger>
+              <TabsTrigger value="docker">Docker</TabsTrigger>
             </TabsList>
-            <TabsContent value="manual" className="mt-6 space-y-6">
-              <div>
-                <h3 className="mb-3 text-xl font-semibold">1. 克隆仓库</h3>
-                <div className="bg-muted rounded-md p-4 font-mono text-sm">
-                  git clone https://github.com/JefferyHcool/BiliNote.git
-                  <br />
-                  cd BiliNote
-                  <br />
-                  mv .env.example .env
-                </div>
+            <TabsContent value="manual" className="mt-4 space-y-4">
+              <div className="rounded-md bg-neutral-950 p-4 font-mono text-sm leading-6 text-neutral-100">
+                cd backend
+                <br />
+                pip install -r requirements.txt
+                <br />
+                python main.py
+                <br />
+                <br />
+                cd BillNote_frontend
+                <br />
+                pnpm install
+                <br />
+                pnpm dev
               </div>
-              <div>
-                <h3 className="mb-3 text-xl font-semibold">2. 启动后端（FastAPI）</h3>
-                <div className="bg-muted rounded-md p-4 font-mono text-sm">
-                  cd backend
-                  <br />
-                  pip install -r requirements.txt
-                  <br />
-                  python main.py
-                </div>
-              </div>
-              <div>
-                <h3 className="mb-3 text-xl font-semibold">3. 启动前端（Vite + React）</h3>
-                <div className="bg-muted rounded-md p-4 font-mono text-sm">
-                  cd BiliNote_frontend
-                  <br />
-                  pnpm install
-                  <br />
-                  pnpm dev
-                </div>
-              </div>
-              <p>
-                访问：<code className="bg-muted rounded px-2 py-1">http://localhost:5173</code>
-              </p>
             </TabsContent>
-            <TabsContent value="docker" className="mt-6 space-y-6">
-              <div>
-                <h3 className="mb-3 text-xl font-semibold">1. 克隆仓库</h3>
-                <div className="bg-muted rounded-md p-4 font-mono text-sm">
-                  git clone https://github.com/JefferyHcool/BiliNote.git
-                  <br />
-                  cd BiliNote
-                  <br />
-                  mv .env.example .env
-                </div>
+            <TabsContent value="docker" className="mt-4 space-y-4">
+              <div className="rounded-md bg-neutral-950 p-4 font-mono text-sm leading-6 text-neutral-100">
+                docker compose up --build
               </div>
-              <div>
-                <h3 className="mb-3 text-xl font-semibold">2. 启动 Docker Compose</h3>
-                <div className="bg-muted rounded-md p-4 font-mono text-sm">
-                  docker compose up --build
-                </div>
-              </div>
-              <p>
-                默认端口：
-                <br />
-                前端：http://localhost:${'{FRONTEND_PORT}'}
-                <br />
-                后端：http://localhost:${'{BACKEND_PORT}'}
-                <br />
-                <span className="text-muted-foreground text-sm">
-                  .env 文件中可自定义端口与环境配置
-                </span>
-              </p>
             </TabsContent>
           </Tabs>
         </section>
-
-        {/* Community Section */}
-        <section className="mb-16">
-          <h2 className="mb-8 text-center text-3xl font-bold">联系和加入社区</h2>
-          <div className="mx-auto max-w-3xl">
-            <div className="flex flex-col items-center justify-center gap-10 md:flex-row md:items-start">
-              <div className="text-center">
-                <h3 className="mb-3 text-xl font-semibold">BiliNote 交流微信群</h3>
-                <div className="bg-muted mx-auto flex h-52 w-52 items-center justify-center rounded-md">
-                  <img src={wechatQr} alt="BiliNote 交流微信群" className="h-full w-full object-contain" />
-                </div>
-                <p className="text-muted-foreground mt-3 text-sm">扫码加入交流群，一起讨论使用问题</p>
-              </div>
-              <div className="text-center">
-                <h3 className="mb-3 text-xl font-semibold">BiliNote AI笔记系统一对一搭建服务</h3>
-                <div className="bg-muted mx-auto flex h-52 w-52 items-center justify-center rounded-md">
-                  <img
-                    src={remoteInstallQr}
-                    alt="BiliNote AI笔记系统一对一搭建服务"
-                    className="h-full w-full object-contain"
-                  />
-                </div>
-                <p className="text-muted-foreground mt-3 text-sm">
-                  专人一对一远程协助，从部署到上手全程陪跑
-                  <br />
-                  扫码加微信，备注「搭建服务」即可咨询
-                </p>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* License Section */}
-        <section className="mb-8 text-center">
-          <h2 className="mb-4 text-3xl font-bold">📜 License</h2>
-          <p>MIT License</p>
-        </section>
-
-        {/* Footer */}
-        <footer className="border-t pt-8 text-center">
-          <p className="mb-4">💬 你的支持与反馈是我持续优化的动力！欢迎 PR、提 issue、Star ⭐️</p>
-        </footer>
       </div>
     </ScrollArea>
   )

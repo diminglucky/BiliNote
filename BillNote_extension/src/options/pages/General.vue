@@ -95,7 +95,7 @@ onMounted(async () => {
         {{ status.text }}
       </div>
       <p class="text-xs text-gray-500">
-        默认 http://localhost:8483 — 需要在该地址先跑起 BiliNote 后端
+        默认 http://localhost:8483 — 需要在该地址先跑起 VideoNote 后端
       </p>
     </section>
 

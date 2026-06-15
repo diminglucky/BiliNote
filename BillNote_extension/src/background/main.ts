@@ -141,13 +141,13 @@ onMessage<{ url: string; title?: string }, 'bilinote-start'>('bilinote-start', a
 // ---------- 安装时事件 ----------
 
 browser.runtime.onInstalled.addListener(() => {
-  console.log('BiliNote extension installed')
+  console.log('VideoNote extension installed')
 
-  // 右键菜单：在视频页或视频链接上"用 BiliNote 总结"
+  // 右键菜单：在视频页或视频链接上"用 VideoNote 总结"
   try {
     browser.contextMenus.create({
       id: 'bilinote-summarize-page',
-      title: '用 BiliNote 总结此视频',
+      title: '用 VideoNote 总结此视频',
       contexts: ['page', 'link', 'video'],
       documentUrlPatterns: [
         '*://*.bilibili.com/*',

@@ -38,7 +38,7 @@ function describeWarning(payload: DiagnosticPayload): { title: string; detail: s
     title: '检测到可能导致后端启动失败的安装路径',
     detail:
       `${parts.join('；')}。\n` +
-      '建议把 BiliNote 重新安装到一个纯英文、无空格、可写的路径下（如 C:\\BiliNote\\ 或 /Applications/）。\n' +
+      '建议把 VideoNote 重新安装到一个纯英文、无空格、可写的路径下（如 C:\\VideoNote\\ 或 /Applications/）。\n' +
       `当前路径：${payload.exe_path || '未知'}`,
   }
 }

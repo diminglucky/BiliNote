@@ -7,7 +7,7 @@ interface RootLayoutProps {
 }
 
 export const metadata = {
-  title: 'BiliNote - 视频笔记生成器',
+  title: 'VideoNote - 视频笔记生成器',
   description: '通过视频链接结合大模型自动生成对应的笔记',
 }
 

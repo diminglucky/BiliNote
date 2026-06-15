@@ -96,7 +96,7 @@ function BackendInitDialog({ open, failed = false, lastError = null, onRetry }: 
                 <>
                   <p>当前是浏览器开发模式，请先启动后端：</p>
                   <pre className="mt-1 overflow-auto rounded bg-zinc-900 px-2 py-1.5 font-mono text-[11px] leading-snug text-zinc-100">
-                    cd D:\code\play\BiliNote\backend{'\n'}
+                    cd backend{'\n'}
                     D:\software\anaconda\envs\play\python.exe main.py
                   </pre>
                 </>
@@ -128,16 +128,9 @@ function BackendInitDialog({ open, failed = false, lastError = null, onRetry }: 
               )}
             </div>
             <p className="text-xs text-muted-foreground pt-2">
-              {isTauri ? '仍然无法解决？复制日志去 ' : '后端启动后点击“重试”；仍然无法解决可去 '}
-              <a
-                href="https://github.com/JefferyHcool/BiliNote/issues"
-                target="_blank"
-                rel="noreferrer"
-                className="text-blue-600 underline"
-              >
-                GitHub Issues
-              </a>
-              &nbsp;反馈。
+              {isTauri
+                ? '仍然无法解决？请复制启动日志后定位具体原因。'
+                : '后端启动后点击“重试”；仍然无法解决时请复制终端日志继续排查。'}
             </p>
           </div>
         </DialogContent>

@@ -76,7 +76,7 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         // 用 build()+run() 拿到 RunEvent 流，关键诉求：app 退出前必须 kill 掉 PyInstaller
-        // sidecar，否则它会变成持有 8483 端口的孤儿进程，下次启动 BiliNote 直接 bind 失败。
+        // sidecar，否则它会变成持有 8483 端口的孤儿进程，下次启动 VideoNote 直接 bind 失败。
         // 之前漏掉这一步导致用户 PID 96739 那种「上次没关干净 → 这次起不来」的死循环。
         .run(|app_handle, event| {
             match event {
@@ -289,8 +289,8 @@ fn spawn_backend_sidecar(app_handle: &tauri::AppHandle) -> Result<CommandChild, 
 
     let mut sidecar_command = app_handle
         .shell()
-        .sidecar("BiliNoteBackend")
-        .map_err(|e| format!("找不到 BiliNoteBackend sidecar: {}", e))?;
+        .sidecar("VideoNoteBackend")
+        .map_err(|e| format!("找不到 VideoNote 后端 sidecar: {}", e))?;
     for (key, value) in &all_env_vars {
         sidecar_command = sidecar_command.env(key, value);
     }

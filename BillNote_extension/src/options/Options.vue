@@ -22,7 +22,7 @@ const ActiveComponent = computed(() => TABS.find(t => t.id === activeTab.value)?
   <div class="flex h-screen bg-gray-50 text-gray-800">
     <aside class="w-56 shrink-0 border-r bg-white flex flex-col">
       <div class="px-4 py-4 border-b">
-        <div class="text-lg font-bold">BiliNote</div>
+        <div class="text-lg font-bold">VideoNote</div>
         <div class="text-xs text-gray-500">浏览器插件设置</div>
       </div>
       <nav class="flex-1 overflow-auto py-2">

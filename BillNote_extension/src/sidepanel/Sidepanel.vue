@@ -118,7 +118,7 @@ onUnmounted(() => {
   <main class="w-full h-full flex flex-col bg-white text-sm text-gray-800">
     <!-- 顶栏：极简 -->
     <header class="flex items-center justify-between px-3 py-2 border-b shrink-0">
-      <div class="font-semibold">BiliNote</div>
+      <div class="font-semibold">VideoNote</div>
       <div class="flex items-center gap-1">
         <button
           v-if="(tasks?.length ?? 0) > 0"
@@ -157,7 +157,7 @@ onUnmounted(() => {
     </div>
 
     <section v-if="!activeTask" class="flex-1 flex items-center justify-center text-gray-400 text-xs px-4 text-center">
-      还没有任务。在视频页点悬浮按钮、在 popup 提交，或右键菜单选「用 BiliNote 总结」。
+      还没有任务。在视频页点悬浮按钮、在 popup 提交，或右键菜单选「用 VideoNote 总结」。
     </section>
 
     <section v-else class="flex-1 flex flex-col min-h-0">

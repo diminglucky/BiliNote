@@ -12,13 +12,23 @@ export const HomePage: FC = () => {
   const currentTask = tasks.find(t => t.id === currentTaskId)
 
   const [status, setStatus] = useState<ViewStatus>('idle')
-
-  const content = currentTask?.markdown || ''
+  const hasRenderableContent = Boolean(
+    currentTask &&
+      (Array.isArray(currentTask.markdown)
+        ? currentTask.markdown.length > 0
+        : typeof currentTask.markdown === 'string'
+          ? currentTask.markdown.trim()
+          : false),
+  )
 
   useEffect(() => {
     if (!currentTask) {
       setStatus('idle')
-    } else if (currentTask.status === 'SUCCESS' || (currentTask.status === 'ENHANCING' && currentTask.markdown)) {
+    } else if (
+      currentTask.status === 'SUCCESS' ||
+      currentTask.status === 'ENHANCING' ||
+      hasRenderableContent
+    ) {
       setStatus('success')
     } else if (currentTask.status === 'FAILED') {
       setStatus('failed')
@@ -26,14 +36,8 @@ export const HomePage: FC = () => {
       // PENDING、PARSING、DOWNLOADING、TRANSCRIBING、SUMMARIZING 等所有进行中状态
       setStatus('loading')
     }
-  }, [currentTask, currentTask?.status])
+  }, [currentTask, currentTask?.status, hasRenderableContent])
 
-  // useEffect( () => {
-  //     get_task_status('d4e87938-c066-48a0-bbd5-9bec40d53354').then(res=>{
-  //         console.log('res1',res)
-  //         setContent(res.data.result.markdown)
-  //     })
-  // }, [tasks]);
   return (
     <HomeLayout
       NoteForm={<NoteForm />}

@@ -14,18 +14,26 @@ html, body, #root {
 
 /* 修改滚动条的轨道颜色 */
 ::-webkit-scrollbar-track {
-  background-color: #f1f1f1; /* 轨道的背景颜色 */
+  background-color: #f5f5f5; /* 轨道的背景颜色 */
 }
 
 /* 修改滚动条的滑块颜色 */
 ::-webkit-scrollbar-thumb {
-  background-color: #888; /* 滑块的颜色 */
+  background-color: #d4d4d4; /* 滑块的颜色 */
   border-radius: 4px; /* 圆角 */
 }
 
 /* 当鼠标悬停时，修改滑块颜色 */
 ::-webkit-scrollbar-thumb:hover {
-  background-color: #555; /* 悬停时的颜色 */
+  background-color: #a3a3a3; /* 悬停时的颜色 */
+}
+
+.scrollbar-none {
+  scrollbar-width: none;
+}
+
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
 }
 
 :root {
@@ -36,8 +44,8 @@ html, body, #root {
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
-  --primary: #3c77fb;
-  --primary-light: #e0eeff;
+  --primary: #1f2937;
+  --primary-light: #f5f5f5;
   --primary-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
@@ -48,7 +56,7 @@ html, body, #root {
   --destructive: oklch(0.577 0.245 27.325);
   --border: var(    --color-neutral-200);
   --input: oklch(0.922 0 0);
-  --ring: #096dd9;
+  --ring: #737373;
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
@@ -71,8 +79,8 @@ html, body, #root {
   --card-foreground: oklch(0.985 0 0);
   --popover: oklch(0.205 0 0);
   --popover-foreground: oklch(0.985 0 0);
-  --primary: #3c77fb;
-  --primary-light: #e0eeff;
+  --primary: #d6c6aa;
+  --primary-light: #262626;
   --primary-foreground: oklch(0.205 0 0);
   --secondary: oklch(0.269 0 0);
   --secondary-foreground: oklch(0.985 0 0);

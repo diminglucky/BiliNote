@@ -1,11 +1,12 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Copy, Download, BrainCircuit, MessageSquare } from 'lucide-react'
+import { Copy, Download, MessageSquare } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Badge } from '@/components/ui/badge'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 interface VersionNote {
   ver_id: string
@@ -26,10 +27,16 @@ interface NoteHeaderProps {
   noteStyles: { value: string; label: string }[]
   onCopy: () => void
   onDownload: () => void
+  isExporting?: boolean
   createAt?: string | Date
   setShowTranscribe: (show: boolean) => void
+  showTranscribe: boolean
   showChat?: false | 'half' | 'full'
   setShowChat?: (mode: false | 'half' | 'full') => void
+  viewMode: 'map' | 'preview'
+  setViewMode: (mode: 'map' | 'preview') => void
+  isTaskRunning?: boolean
+  taskStatus?: string
 }
 
 export function MarkdownHeader({
@@ -42,6 +49,7 @@ export function MarkdownHeader({
   noteStyles,
   onCopy,
   onDownload,
+  isExporting,
   createAt,
   showTranscribe,
   setShowTranscribe,
@@ -49,6 +57,8 @@ export function MarkdownHeader({
   setShowChat,
   viewMode,
   setViewMode,
+  isTaskRunning,
+  taskStatus,
 }: NoteHeaderProps) {
   const [copied, setCopied] = useState(false)
 
@@ -67,10 +77,6 @@ export function MarkdownHeader({
 
   const styleName = noteStyles.find(v => v.value === style)?.label || style
 
-  const reversedMarkdown: VersionNote[] = Array.isArray(currentTask?.markdown)
-    ? [...currentTask!.markdown].reverse()
-    : []
-
   const formatDate = (date: string | Date | undefined) => {
     if (!date) return ''
     const d = typeof date === 'string' ? new Date(date) : date
@@ -87,65 +93,60 @@ export function MarkdownHeader({
   }
 
   return (
-    <div className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-3 border-b bg-white/95 px-4 py-2 backdrop-blur-sm">
-      {/* 左侧区域：版本 + 标签 + 创建时间 */}
-      <div className="flex flex-wrap items-center gap-3">
-        {isMultiVersion && (
-          <Select value={currentVerId} onValueChange={setCurrentVerId}>
-            <SelectTrigger className="h-8 w-[160px] text-sm">
-              <div className="flex items-center">
-                {(() => {
-                  const idx = currentTask?.markdown.findIndex(v => v.ver_id === currentVerId)
-                  return idx !== -1 ? `版本（${currentVerId.slice(-6)}）` : ''
-                })()}
-              </div>
-            </SelectTrigger>
+    <div className="sticky top-0 z-10 border-b bg-white/95 backdrop-blur-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            {isMultiVersion && (
+              <Select value={currentVerId} onValueChange={setCurrentVerId}>
+                <SelectTrigger className="h-8 w-[160px] text-sm">
+                  <div className="flex items-center">
+                    {(() => {
+                      const idx = currentTask?.markdown.findIndex(v => v.ver_id === currentVerId)
+                      return idx !== -1 ? `版本（${currentVerId.slice(-6)}）` : ''
+                    })()}
+                  </div>
+                </SelectTrigger>
 
-            <SelectContent>
-              {(currentTask?.markdown || []).map((v, idx) => {
-                const shortId = v.ver_id.slice(-6)
-                return (
-                  <SelectItem key={v.ver_id} value={v.ver_id}>
-                    {`版本（${shortId}）`}
-                  </SelectItem>
-                )
-              })}
-            </SelectContent>
-          </Select>
-        )}
+                <SelectContent>
+                  {(currentTask?.markdown || []).map(v => {
+                    const shortId = v.ver_id.slice(-6)
+                    return (
+                      <SelectItem key={v.ver_id} value={v.ver_id}>
+                        {`版本（${shortId}）`}
+                      </SelectItem>
+                    )
+                  })}
+                </SelectContent>
+              </Select>
+            )}
 
-        <Badge variant="secondary" className="bg-pink-100 text-pink-700 hover:bg-pink-200">
-          {modelName}
-        </Badge>
-        <Badge variant="secondary" className="bg-cyan-100 text-cyan-700 hover:bg-cyan-200">
-          {styleName}
-        </Badge>
+            <Badge variant="secondary" className="border border-neutral-200 bg-neutral-100 text-neutral-700 hover:bg-neutral-200">
+              {modelName}
+            </Badge>
+            <Badge variant="secondary" className="border border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-100">
+              {styleName}
+            </Badge>
+            {createAt && <div className="text-sm text-neutral-500">创建时间 {formatDate(createAt)}</div>}
+            {isTaskRunning && (
+              <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-700">
+                {taskStatus === 'ENHANCING' ? '截图增强中' : '重新生成中'}
+              </Badge>
+            )}
+          </div>
+        </div>
 
-        {createAt && (
-          <div className="text-muted-foreground text-sm">创建时间: {formatDate(createAt)}</div>
-        )}
-      </div>
-
-      {/* 右侧操作按钮 */}
-      <div className="flex items-center gap-1">
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                onClick={() => {
-                  setViewMode(viewMode == 'preview' ? 'map' : 'preview')
-                }}
-                variant="ghost"
-                size="sm"
-                className="h-8 px-2"
-              >
-                <BrainCircuit className="mr-1.5 h-4 w-4" />
-                <span className="text-sm">{viewMode == 'preview' ? '思维导图' : 'markdown'}</span>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>思维导图</TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+        <div className="flex items-center gap-2">
+          <Tabs value={viewMode} onValueChange={v => setViewMode(v as 'map' | 'preview')}>
+            <TabsList className="h-9 w-auto">
+              <TabsTrigger value="preview" className="h-8 px-3 text-xs">
+                Markdown
+              </TabsTrigger>
+              <TabsTrigger value="map" className="h-8 px-3 text-xs">
+                思维导图
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -161,12 +162,18 @@ export function MarkdownHeader({
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button onClick={onDownload} variant="ghost" size="sm" className="h-8 px-2">
+              <Button
+                onClick={onDownload}
+                variant="ghost"
+                size="sm"
+                className="h-8 px-2"
+                disabled={isExporting}
+              >
                 <Download className="mr-1.5 h-4 w-4" />
-                <span className="text-sm">导出 Markdown</span>
+                <span className="text-sm">{isExporting ? '打包中' : '导出笔记'}</span>
               </Button>
             </TooltipTrigger>
-            <TooltipContent>下载为 Markdown 文件</TooltipContent>
+            <TooltipContent>下载为 Markdown 图片包，含普通版和内嵌版</TooltipContent>
           </Tooltip>
         </TooltipProvider>
         <TooltipProvider>
@@ -176,12 +183,11 @@ export function MarkdownHeader({
                 onClick={() => {
                   setShowTranscribe(!showTranscribe)
                 }}
-                variant="ghost"
+                variant={showTranscribe ? 'default' : 'ghost'}
                 size="sm"
                 className="h-8 px-2"
               >
-                {/*<Download className="mr-1.5 h-4 w-4" />*/}
-                <span className="text-sm">原文参照</span>
+                <span className="text-sm">原文</span>
               </Button>
             </TooltipTrigger>
             <TooltipContent>原文参照</TooltipContent>
@@ -198,13 +204,14 @@ export function MarkdownHeader({
                   className="h-8 px-2"
                 >
                   <MessageSquare className="mr-1.5 h-4 w-4" />
-                  <span className="text-sm">AI 问答</span>
+                  <span className="text-sm">问答</span>
                 </Button>
               </TooltipTrigger>
               <TooltipContent>基于笔记内容的 AI 问答</TooltipContent>
             </Tooltip>
           </TooltipProvider>
         )}
+        </div>
       </div>
     </div>
   )

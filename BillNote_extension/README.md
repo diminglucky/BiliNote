@@ -1,6 +1,6 @@
-# BiliNote 浏览器插件
+# VideoNote 浏览器插件
 
-把 BiliNote 的"视频链接 → Markdown 笔记"能力下沉到浏览器插件。当前为 P1 MVP（仅工具栏 popup）。
+把 VideoNote 的"视频链接 → Markdown 笔记"能力下沉到浏览器插件。当前为 P1 MVP（仅工具栏 popup）。
 
 ## 当前状态（P1 MVP）
 
@@ -27,7 +27,7 @@ pnpm dev      # watch 模式，产物输出到 ./extension/
 1. `chrome://extensions/` → 打开右上"开发者模式"
 2. 点"加载已解压的扩展程序"，选 `BillNote_extension/extension/` 目录
 3. 启动后端：`cd backend && python main.py`（默认 8483）
-4. 浏览器开任意支持的视频页（B 站 / YouTube / 抖音 / 快手），点工具栏 BiliNote 图标
+4. 浏览器开任意支持的视频页（B 站 / YouTube / 抖音 / 快手），点工具栏 VideoNote 图标
 5. 首次使用先打开"设置"，填后端地址 → 选供应商 + 模型
 
 ## 后端要求
