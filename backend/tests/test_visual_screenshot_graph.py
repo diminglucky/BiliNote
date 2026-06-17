@@ -421,6 +421,149 @@ class TestVisualScreenshotGraph(unittest.TestCase):
         self.assertIs(result, state)
         self.assertLessEqual(max_active, 2)
 
+    def test_prepare_state_normalizes_plural_screenshot_markers(self):
+        from app.services.visual_screenshot_agent import VisualScreenshotAgent, VisualScreenshotState
+
+        agent = VisualScreenshotAgent(".", "/static/screenshots")
+        state = VisualScreenshotState(
+            markdown="## Demo\nScreenshots-[04:16], [04:44], [05:12]",
+            video_path=pathlib.Path("video.mp4"),
+            duration=360,
+        )
+
+        agent.prepare_state(state)
+
+        self.assertNotIn("Screenshots-", state.markdown)
+        self.assertEqual(
+            state.matches,
+            [
+                ("*Screenshot-[04:16]", 256),
+                ("*Screenshot-[04:44]", 284),
+                ("*Screenshot-[05:12]", 312),
+            ],
+        )
+
+    def test_supplemental_budget_comes_from_visual_content_not_duration(self):
+        from app.services.visual_screenshot_agent import VisualSectionPlan, screenshot_content_budget
+
+        plans = [
+            VisualSectionPlan(
+                title="One useful screen",
+                start=60,
+                end=120,
+                score=5.0,
+                reasons=["screen"],
+                line_index=1,
+            )
+        ]
+
+        self.assertEqual(screenshot_content_budget(plans), 1)
+
+    def test_section_analyzer_reads_markdown_before_planning_images(self):
+        from app.services.visual_screenshot_agent import VisualScreenshotAgent
+
+        markdown = (
+            "## Concept only *Content-[00:00]\n"
+            "This section explains history and definitions only.\n\n"
+            "## Code result walkthrough *Content-[02:00]\n"
+            "The screen shows code, command output, UI result, and final page.\n"
+            "```bash\npython app.py\n```\n"
+            "1. Open the settings page\n"
+            "2. Run the command\n"
+            "3. Check the final result\n"
+        )
+        agent = VisualScreenshotAgent(".", "/static/screenshots")
+
+        analyses = agent.analyze_markdown_sections(markdown, 420)
+
+        self.assertEqual(len(analyses), 1)
+        self.assertEqual(analyses[0].title, "Code result walkthrough")
+        self.assertGreaterEqual(analyses[0].suggested_count, 2)
+        self.assertIn("code-block", analyses[0].reasons)
+
+    def test_section_analyzer_uses_transcript_alignment_when_content_marker_is_missing(self):
+        from app.services.visual_screenshot_agent import VisualScreenshotAgent
+
+        markdown = (
+            "## UI 操作演示\n"
+            "这里演示设置页、代码和运行结果。\n\n"
+            "## 另一个章节\n"
+            "这里只是背景说明。\n"
+        )
+        transcript_segments = [
+            {"start": 12, "end": 18, "text": "这里打开设置页"},
+            {"start": 18, "end": 30, "text": "然后展示运行结果和页面"},
+            {"start": 90, "end": 98, "text": "这里是背景说明"},
+        ]
+        agent = VisualScreenshotAgent(".", "/static/screenshots")
+
+        analyses = agent.analyze_markdown_sections(markdown, 180, transcript_segments=transcript_segments)
+
+        self.assertEqual(len(analyses), 1)
+        self.assertEqual(analyses[0].title, "UI 操作演示")
+        self.assertLessEqual(analyses[0].start, 18)
+        self.assertIn("transcript-align", analyses[0].reasons)
+
+    def test_plan_visual_screenshots_prefers_explicit_markers_over_duration(self):
+        from app.services.visual_screenshot_agent import VisualScreenshotAgent
+
+        markdown = (
+            "## Intro *Content-[00:10]\n"
+            "This section gives background and a demo screenshot hint.\n"
+            "*Screenshot-[00:20]\n\n"
+            "## Deep dive *Content-[02:00]\n"
+            "This section shows code, UI, result, and final workflow.\n"
+            "*Screenshot-[02:10]\n"
+        )
+        agent = VisualScreenshotAgent(".", "/static/screenshots")
+
+        plans = agent.plan_visual_screenshots(markdown, 900)
+
+        self.assertGreaterEqual(len(plans), 2)
+        self.assertTrue(any(plan.start <= 30 for plan in plans))
+        self.assertTrue(any(110 <= plan.start <= 150 for plan in plans))
+        self.assertTrue(all(plan.start < 850 for plan in plans))
+
+    def test_filter_keeps_explicit_screenshot_markers_when_no_plan_exists(self):
+        from app.services.visual_screenshot_agent import VisualScreenshotAgent
+
+        markdown = (
+            "## Dense demo *Content-[00:00]\n"
+            "Important UI sequence.\n"
+            "*Screenshot-[00:10]\n"
+            "*Screenshot-[00:20]\n"
+        )
+        matches = VisualScreenshotAgent.extract_screenshot_timestamps(markdown)
+
+        filtered_markdown, filtered = VisualScreenshotAgent.filter_screenshot_matches_by_structure(
+            markdown,
+            matches,
+            [],
+        )
+
+        self.assertEqual(filtered, matches)
+        self.assertIn("*Screenshot-[00:10]", filtered_markdown)
+        self.assertIn("*Screenshot-[00:20]", filtered_markdown)
+
+    def test_dense_short_section_keeps_multiple_visual_plans(self):
+        from app.services.visual_screenshot_agent import VisualScreenshotAgent
+
+        agent = VisualScreenshotAgent(".", "/static/screenshots")
+        markdown = (
+            "## UI 操作演示 *Content-[00:00]\n"
+            "这里连续展示页面、参数、代码和最终结果。\n"
+            "*Screenshot-[00:10]\n"
+            "*Screenshot-[00:25]\n"
+            "*Screenshot-[00:40]\n"
+            "*Screenshot-[00:55]\n"
+        )
+
+        plans = agent.plan_visual_screenshots(markdown, 90)
+
+        self.assertGreaterEqual(len(plans), 3)
+        self.assertTrue(any(8 <= plan.start <= 14 for plan in plans))
+        self.assertTrue(any(22 <= plan.start <= 30 for plan in plans))
+
     def test_real_langgraph_path_cleans_candidate_files_when_scoring_fails(self):
         from app.services.visual_screenshot_agent import VisualScreenshotAgent, VisualScreenshotState
 

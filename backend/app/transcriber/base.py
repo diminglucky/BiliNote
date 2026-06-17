@@ -11,7 +11,6 @@ class Transcriber(ABC):
         :param file_path:音频路径
         :return: 返回一个 TranscriptResult 类
         '''
-        pass
 
     def on_finish(self,video_path:str,result: TranscriptResult)->None:
         '''
@@ -20,4 +19,3 @@ class Transcriber(ABC):
         :param result: 识别结果
         :return:
         '''
-        pass

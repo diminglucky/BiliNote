@@ -1,5 +1,4 @@
 import json
-from typing import Optional
 
 from app.gpt.gpt_factory import GPTFactory
 from app.models.model_config import ModelConfig

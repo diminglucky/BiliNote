@@ -1,6 +1,8 @@
 import operator
 from functools import lru_cache
-from typing import Annotated, Any, NotRequired, TypedDict
+from typing import Annotated, Any, TypedDict
+
+from typing_extensions import NotRequired
 
 
 class VisualScreenshotGraphState(TypedDict):

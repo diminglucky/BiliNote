@@ -1,4 +1,4 @@
-from abc import ABC,abstractmethod
+from abc import ABC
 
 from app.models.gpt_model import GPTSource
 
@@ -10,7 +10,6 @@ class GPT(ABC):
         :param source: 
         :return:
         '''
-        pass
     def create_messages(self, segments:list,**kwargs)->list:
         pass
     def list_models(self):

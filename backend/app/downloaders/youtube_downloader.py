@@ -12,6 +12,12 @@ from app.models.transcriber_model import TranscriptResult
 from app.services.proxy_config_manager import ProxyConfigManager
 from app.utils.path_helper import get_data_dir
 from app.utils.url_parser import extract_video_id
+from app.utils.video_quality import (
+    cleanup_quarantined_video,
+    is_screenshot_ready_video,
+    quarantine_low_quality_video,
+    restore_quarantined_video,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +95,9 @@ class YoutubeDownloader(Downloader, ABC):
             output_dir = get_data_dir()
         video_id = extract_video_id(video_url, "youtube")
         video_path = os.path.join(output_dir, f"{video_id}.mp4")
-        if os.path.exists(video_path):
+        if os.path.exists(video_path) and is_screenshot_ready_video(video_path):
             return video_path
+        low_quality_cache_path = quarantine_low_quality_video(video_path)
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, "%(id)s.%(ext)s")
 
@@ -103,13 +110,22 @@ class YoutubeDownloader(Downloader, ABC):
         }
 
         _apply_proxy(ydl_opts)
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=True)
-            video_id = info.get("id")
-            video_path = os.path.join(output_dir, f"{video_id}.mp4")
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(video_url, download=True)
+                video_id = info.get("id")
+                video_path = os.path.join(output_dir, f"{video_id}.mp4")
+        except Exception:
+            restore_quarantined_video(low_quality_cache_path, video_path)
+            raise
 
         if not os.path.exists(video_path):
+            restore_quarantined_video(low_quality_cache_path, video_path)
             raise FileNotFoundError(f"视频文件未找到: {video_path}")
+        if not is_screenshot_ready_video(video_path):
+            restore_quarantined_video(low_quality_cache_path, video_path)
+            raise RuntimeError("下载的视频清晰度不足，无法生成清晰截图")
+        cleanup_quarantined_video(low_quality_cache_path)
 
         return video_path
 

@@ -9,10 +9,43 @@ interface Step {
 interface StepBarProps {
   steps: Step[]
   currentStep: string
+  compact?: boolean
 }
 
-const StepBar: FC<StepBarProps> = ({ steps, currentStep }) => {
-  const currentIndex = steps.findIndex(step => step.key === currentStep)
+const StepBar: FC<StepBarProps> = ({ steps, currentStep, compact = false }) => {
+  const currentIndex = Math.max(0, steps.findIndex(step => step.key === currentStep))
+
+  if (compact) {
+    return (
+      <div className="flex w-full items-center gap-2 overflow-x-auto py-1">
+        {steps.map((step, index) => {
+          const isActive = index <= currentIndex
+          const isCurrent = index === currentIndex
+          return (
+            <div key={step.key} className="flex min-w-fit items-center gap-2">
+              <div
+                className={`flex h-5 w-5 items-center justify-center rounded-full border text-[10px] font-semibold ${
+                  isCurrent
+                    ? 'border-amber-500 bg-amber-500 text-white'
+                    : isActive
+                      ? 'border-emerald-500 bg-emerald-500 text-white'
+                      : 'border-neutral-300 bg-white text-neutral-400'
+                }`}
+              >
+                {index + 1}
+              </div>
+              <span className={`text-xs ${isCurrent ? 'font-medium text-amber-800' : isActive ? 'text-neutral-700' : 'text-neutral-400'}`}>
+                {step.label}
+              </span>
+              {index < steps.length - 1 && (
+                <div className={`h-px w-5 ${index < currentIndex ? 'bg-emerald-400' : 'bg-neutral-200'}`} />
+              )}
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
 
   return (
     <div className="flex w-full items-center justify-between">

@@ -15,6 +15,12 @@ from app.enmus.note_enums import DownloadQuality
 from app.models.audio_model import AudioDownloadResult
 from app.services.cookie_manager import CookieConfigManager
 from app.utils.path_helper import get_data_dir
+from app.utils.video_quality import (
+    cleanup_quarantined_video,
+    is_screenshot_ready_video,
+    quarantine_low_quality_video,
+    restore_quarantined_video,
+)
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -121,7 +127,7 @@ class DouyinDownloader(Downloader):
 
     @staticmethod
     def find_url(string: str) -> list:
-        url = re.findall('http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', string)
+        url = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', string)
         return url
 
     def extract_video_id(self, url: str) -> str:
@@ -270,23 +276,30 @@ class DouyinDownloader(Downloader):
 
             video_id = self.extract_video_id(video_url)
             video_path = os.path.join(output_dir, f"{video_id}.mp4")
-            if os.path.exists(video_path):
+            if os.path.exists(video_path) and is_screenshot_ready_video(video_path):
                 return video_path
+            low_quality_cache_path = quarantine_low_quality_video(video_path)
 
 
             output_path = os.path.join(output_dir, "%(id)s.%(ext)s")
 
-            video_data = self.fetch_video_info(video_url)
-            output_path = output_path % {
-                "id": video_data['aweme_detail']['aweme_id'],
-                "ext": "mp4",
-            }
+            try:
+                video_data = self.fetch_video_info(video_url)
+                output_path = output_path % {
+                    "id": video_data['aweme_detail']['aweme_id'],
+                    "ext": "mp4",
+                }
 
-            url=video_data['aweme_detail']['video']['download_addr']['url_list'][0]
-            _data = requests.get(url,allow_redirects=True,headers=self.headers_config)
+                url=video_data['aweme_detail']['video']['download_addr']['url_list'][0]
+                _data = requests.get(url,allow_redirects=True,headers=self.headers_config)
 
-            with open(output_path, 'wb') as f:
-                f.write(_data.content)
+                with open(output_path, 'wb') as f:
+                    f.write(_data.content)
+            except Exception:
+                restore_quarantined_video(low_quality_cache_path, video_path)
+                raise
+
+            cleanup_quarantined_video(low_quality_cache_path)
 
             return output_path
         except Exception as e:

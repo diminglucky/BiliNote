@@ -346,7 +346,8 @@ const NoteForm = () => {
     // message.success('已提交任务')
     try {
       const data = await generateNote(payload)
-      addPendingTask(data.task_id, values.platform, payload)
+      addPendingTask(data.task_id, values.platform, payload, data.generation_token)
+      toast.success('笔记生成任务已提交！')
     } catch (e: any) {
       // 就绪门禁：本地转写模型还没下载好。后端返回 reason='transcriber_model_not_ready'，
       // 引导用户去「设置 → 音频转写配置」下载，而不是留一个静默失败的任务。

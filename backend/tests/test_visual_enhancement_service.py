@@ -64,11 +64,12 @@ class TestVisualEnhancementService(unittest.TestCase):
         VisualEnhancementService = self._load_service()
         status_updates = []
 
-        class _NoteGenerator:
+        class _StatusWriter:
             def _update_status(self, task_id, status, message=None):
                 status_updates.append((task_id, getattr(status, "value", status), message))
 
-            def _post_process_markdown(self, markdown, **_kwargs):
+        class _ScreenshotAgent:
+            def insert_screenshots(self, markdown, video_path, duration, gpt, on_markdown_update=None):
                 return markdown + "\n![](/static/screenshots/key.jpg)\n"
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -77,7 +78,8 @@ class TestVisualEnhancementService(unittest.TestCase):
             with patch.object(VisualEnhancementService, "_reindex_task") as reindex:
                 changed = VisualEnhancementService(
                     tmp_dir,
-                    note_generator_factory=_NoteGenerator,
+                    screenshot_agent_factory=_ScreenshotAgent,
+                    status_writer=_StatusWriter(),
                 ).enhance_saved_note(
                     "task-1",
                     "video.mp4",
@@ -94,16 +96,48 @@ class TestVisualEnhancementService(unittest.TestCase):
         self.assertEqual(status_updates[-1][1], "SUCCESS")
         reindex.assert_called_once_with("task-1")
 
+    def test_default_enhancement_path_uses_screenshot_agent_without_note_generator(self):
+        VisualEnhancementService = self._load_service()
+        calls = []
+
+        class _ScreenshotAgent:
+            def insert_screenshots(self, markdown, video_path, duration, gpt, on_markdown_update=None):
+                calls.append((markdown, str(video_path), duration, gpt, on_markdown_update))
+                return markdown + "\n![](/static/screenshots/key.jpg)\n"
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result_path = self._write_result(tmp_dir)
+
+            with patch.object(VisualEnhancementService, "_reindex_task"):
+                changed = VisualEnhancementService(
+                    tmp_dir,
+                    screenshot_agent_factory=_ScreenshotAgent,
+                ).enhance_saved_note(
+                    "task-1",
+                    "video.mp4",
+                    60,
+                    "bilibili",
+                    enhance_token="token-1",
+                    generation_token="generation-1",
+                )
+
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(changed)
+        self.assertIn("key.jpg", payload["markdown"])
+        self.assertEqual(len(calls), 1)
+
     def test_enhance_saved_note_publishes_incremental_markdown_updates(self):
         VisualEnhancementService = self._load_service()
         snapshots = []
 
-        class _NoteGenerator:
+        class _StatusWriter:
             def _update_status(self, task_id, status, message=None):
                 snapshots.append((getattr(status, "value", status), message))
 
-            def _post_process_markdown(self, markdown, **kwargs):
-                on_update = kwargs["on_markdown_update"]
+        class _ScreenshotAgent:
+            def insert_screenshots(self, markdown, video_path, duration, gpt, on_markdown_update=None):
+                on_update = on_markdown_update
                 first = markdown + "\n![](/static/screenshots/one.jpg)\n"
                 on_update(first, 10, "![](/static/screenshots/one.jpg)")
                 second = first + "\n![](/static/screenshots/two.jpg)\n"
@@ -116,7 +150,8 @@ class TestVisualEnhancementService(unittest.TestCase):
             with patch.object(VisualEnhancementService, "_reindex_task"):
                 changed = VisualEnhancementService(
                     tmp_dir,
-                    note_generator_factory=_NoteGenerator,
+                    screenshot_agent_factory=_ScreenshotAgent,
+                    status_writer=_StatusWriter(),
                 ).enhance_saved_note(
                     "task-1",
                     "video.mp4",
@@ -138,11 +173,12 @@ class TestVisualEnhancementService(unittest.TestCase):
         VisualEnhancementService = self._load_service()
         status_updates = []
 
-        class _NoteGenerator:
+        class _StatusWriter:
             def _update_status(self, task_id, status, message=None):
                 status_updates.append((task_id, getattr(status, "value", status), message))
 
-            def _post_process_markdown(self, *_args, **_kwargs):
+        class _ScreenshotAgent:
+            def insert_screenshots(self, *_args, **_kwargs):
                 raise RuntimeError("bad screenshot")
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -150,7 +186,8 @@ class TestVisualEnhancementService(unittest.TestCase):
 
             changed = VisualEnhancementService(
                 tmp_dir,
-                note_generator_factory=_NoteGenerator,
+                screenshot_agent_factory=_ScreenshotAgent,
+                status_writer=_StatusWriter(),
             ).enhance_saved_note(
                 "task-1",
                 "video.mp4",
@@ -170,12 +207,12 @@ class TestVisualEnhancementService(unittest.TestCase):
     def test_enhance_saved_note_reindexes_partial_increment_after_later_failure(self):
         VisualEnhancementService = self._load_service()
 
-        class _NoteGenerator:
+        class _ScreenshotAgent:
             def _update_status(self, _task_id, _status, message=None):
                 pass
 
-            def _post_process_markdown(self, markdown, **kwargs):
-                kwargs["on_markdown_update"](
+            def insert_screenshots(self, markdown, video_path, duration, gpt, on_markdown_update=None):
+                on_markdown_update(
                     markdown + "\n![](/static/screenshots/one.jpg)\n",
                     10,
                     "![](/static/screenshots/one.jpg)",
@@ -188,7 +225,7 @@ class TestVisualEnhancementService(unittest.TestCase):
             with patch.object(VisualEnhancementService, "_reindex_task") as reindex:
                 changed = VisualEnhancementService(
                     tmp_dir,
-                    note_generator_factory=_NoteGenerator,
+                    screenshot_agent_factory=_ScreenshotAgent,
                 ).enhance_saved_note(
                     "task-1",
                     "video.mp4",
@@ -209,11 +246,12 @@ class TestVisualEnhancementService(unittest.TestCase):
         status_updates = []
         post_process_calls = []
 
-        class _NoteGenerator:
+        class _StatusWriter:
             def _update_status(self, task_id, status, message=None):
                 status_updates.append((task_id, getattr(status, "value", status), message))
 
-            def _post_process_markdown(self, markdown, **_kwargs):
+        class _ScreenshotAgent:
+            def insert_screenshots(self, markdown, video_path, duration, gpt, on_markdown_update=None):
                 post_process_calls.append(markdown)
                 return markdown + "\nstale\n"
 
@@ -222,7 +260,8 @@ class TestVisualEnhancementService(unittest.TestCase):
 
             changed = VisualEnhancementService(
                 tmp_dir,
-                note_generator_factory=_NoteGenerator,
+                screenshot_agent_factory=_ScreenshotAgent,
+                status_writer=_StatusWriter(),
             ).enhance_saved_note(
                 "task-1",
                 "video.mp4",
@@ -244,11 +283,12 @@ class TestVisualEnhancementService(unittest.TestCase):
         status_updates = []
         output_dir_holder = {}
 
-        class _NoteGenerator:
+        class _StatusWriter:
             def _update_status(self, task_id, status, message=None):
                 status_updates.append((task_id, getattr(status, "value", status), message))
 
-            def _post_process_markdown(self, markdown, **_kwargs):
+        class _ScreenshotAgent:
+            def insert_screenshots(self, markdown, video_path, duration, gpt, on_markdown_update=None):
                 result_path = pathlib.Path(output_dir_holder["dir"]) / "task-1.json"
                 current = json.loads(result_path.read_text(encoding="utf-8"))
                 current["markdown"] = "## Fresh retry\n"
@@ -262,7 +302,8 @@ class TestVisualEnhancementService(unittest.TestCase):
 
             changed = VisualEnhancementService(
                 tmp_dir,
-                note_generator_factory=_NoteGenerator,
+                screenshot_agent_factory=_ScreenshotAgent,
+                status_writer=_StatusWriter(),
             ).enhance_saved_note(
                 "task-1",
                 "video.mp4",
@@ -283,11 +324,12 @@ class TestVisualEnhancementService(unittest.TestCase):
         VisualEnhancementService = self._load_service()
         status_updates = []
 
-        class _NoteGenerator:
+        class _StatusWriter:
             def _update_status(self, task_id, status, message=None):
                 status_updates.append((task_id, getattr(status, "value", status), message))
 
-            def _post_process_markdown(self, markdown, **_kwargs):
+        class _ScreenshotAgent:
+            def insert_screenshots(self, markdown, video_path, duration, gpt, on_markdown_update=None):
                 return markdown + "\nold screenshot\n"
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -299,7 +341,8 @@ class TestVisualEnhancementService(unittest.TestCase):
 
             changed = VisualEnhancementService(
                 tmp_dir,
-                note_generator_factory=_NoteGenerator,
+                screenshot_agent_factory=_ScreenshotAgent,
+                status_writer=_StatusWriter(),
             ).enhance_saved_note(
                 "task-1",
                 "video.mp4",

@@ -8,8 +8,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.gpt.prompt import BASE_PROMPT, AI_SUM, SCREENSHOT, LINK, MERGE_PROMPT
-from app.gpt.utils import fix_markdown
+from app.gpt.prompt import MERGE_PROMPT
 from app.gpt.request_chunker import RequestChunker
 from app.models.transcriber_model import TranscriptSegment
 from datetime import timedelta

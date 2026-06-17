@@ -1,7 +1,4 @@
 from fastapi.responses import JSONResponse
-from app.utils.status_code import StatusCode
-from pydantic import BaseModel
-from typing import Optional, Any
 
 
 from fastapi.responses import JSONResponse

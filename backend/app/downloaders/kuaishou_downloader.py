@@ -7,9 +7,9 @@ import requests
 
 from app.downloaders.base import Downloader
 from app.downloaders.kuaishou_helper.kuaishou import KuaiShou
-from app.enmus.note_enums import DownloadQuality
 from app.models.audio_model import AudioDownloadResult
 from app.utils.path_helper import get_data_dir
+from app.utils.video_quality import is_screenshot_ready_video, quarantine_low_quality_video
 
 
 class KuaiShouDownloader(Downloader, ABC):
@@ -88,8 +88,14 @@ class KuaiShouDownloader(Downloader, ABC):
             video_url: str,
             output_dir: Union[str, None] = None,
     ) -> str:
-        print('self.download(video_url, output_dir).video_path',self.download(video_url, output_dir).video_path)
-        return self.download(video_url, output_dir).video_path
+        result = self.download(video_url, output_dir)
+        video_path = result.video_path
+        if video_path and os.path.exists(video_path) and not is_screenshot_ready_video(video_path):
+            quarantine_low_quality_video(video_path)
+            result = self.download(video_url, output_dir)
+            video_path = result.video_path
+        print('self.download(video_url, output_dir).video_path', video_path)
+        return video_path
 
 
 if __name__ == '__main__':

@@ -439,6 +439,11 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const [showChat, setShowChat] = useState<false | 'half' | 'full'>(false)
   const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
   const isTaskRunning = currentTask && !['SUCCESS', 'FAILED'].includes(taskStatus)
+  const runningMessage =
+    taskMessage ||
+    (taskStatus === 'ENHANCING'
+      ? '\u6b63\u5728\u9010\u5f20\u63d2\u5165\u5173\u952e\u622a\u56fe\uff0c\u7b14\u8bb0\u5185\u5bb9\u4f1a\u81ea\u52a8\u66f4\u65b0'
+      : '\u6b63\u5728\u91cd\u65b0\u751f\u6210\uff0c\u65e7\u7b14\u8bb0\u4f1a\u4fdd\u7559\u5230\u65b0\u7248\u672c\u5b8c\u6210')
 
   // 缓存 ReactMarkdown components，仅在 baseURL 变化时重建
   const markdownComponents = useMemo(() => createMarkdownComponents(baseURL), [baseURL])
@@ -701,14 +706,12 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                 <>
                   <ScrollArea className="min-w-0 flex-1">
                     {isTaskRunning && (
-                      <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-5 py-2 text-sm text-amber-800">
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                        <span>
-                          {taskMessage ||
-                            (taskStatus === 'ENHANCING'
-                              ? '正在逐张插入关键截图，笔记内容会自动更新'
-                              : '正在重新生成，旧笔记会保留到新版本完成')}
-                        </span>
+                      <div className="sticky top-0 z-10 border-b border-amber-200 bg-amber-50/95 px-5 py-3 text-amber-900 shadow-sm backdrop-blur">
+                        <div className="mb-2 flex items-center gap-2 text-sm">
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          <span>{runningMessage}</span>
+                        </div>
+                        <StepBar steps={steps} currentStep={taskStatus} compact />
                       </div>
                     )}
                     <div className="px-5 pt-5">

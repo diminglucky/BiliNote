@@ -46,21 +46,15 @@ def replace_content_markers(markdown: str, video_id: str, platform: str = 'bilib
         total_seconds = int(mm) * 60 + int(ss)
 
         if platform == 'bilibili':
-            video_id = video_id.replace("_p", "?p=")
-            url = f"https://www.bilibili.com/video/{video_id}&t={total_seconds}"
             parsed_video_id = safe_video_id.replace("_p", "?p=")
             url = f"https://www.bilibili.com/video/{parsed_video_id}&t={total_seconds}"
         elif platform == 'youtube':
-            url = f"https://www.youtube.com/watch?v={video_id}&t={total_seconds}s"
             url = f"https://www.youtube.com/watch?v={safe_video_id}&t={total_seconds}s"
         elif platform == 'douyin':
-            url = f"https://www.douyin.com/video/{video_id}"
             url = f"https://www.douyin.com/video/{safe_video_id}"
-            return f"[原片 @ {mm}:{ss}]({url})"
         else:
             return f"({mm}:{ss})"
 
         return f"[原片 @ {mm}:{ss}]({url})"
 
     return re.sub(pattern, replacer, markdown)
-

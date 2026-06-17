@@ -9,6 +9,8 @@ from typing import Any, Callable, Optional
 
 
 DEFAULT_NOTE_OUTPUT_DIR = os.getenv("NOTE_OUTPUT_DIR", "note_results")
+DEFAULT_IMAGE_OUTPUT_DIR = os.getenv("OUT_DIR", "./static/screenshots")
+DEFAULT_IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "/static/screenshots")
 
 logger = logging.getLogger(__name__)
 
@@ -19,17 +21,55 @@ class VisualEnhancementService:
     def __init__(
         self,
         note_output_dir: str | Path = DEFAULT_NOTE_OUTPUT_DIR,
-        note_generator_factory: Optional[Callable[[], Any]] = None,
+        status_writer: Optional[Any] = None,
+        screenshot_agent_factory: Optional[Callable[[], Any]] = None,
     ):
         self.note_output_dir = Path(note_output_dir)
-        self.note_generator_factory = note_generator_factory
+        self.status_writer = status_writer
+        self.screenshot_agent_factory = screenshot_agent_factory
 
-    def _note_generator(self, generation_token: Optional[str] = None):
-        if self.note_generator_factory:
-            return self.note_generator_factory()
-        from app.services.note import NoteGenerator
+    def _insert_screenshots(
+        self,
+        markdown: str,
+        video_path: Path,
+        duration: Optional[float],
+        gpt: Any,
+        on_markdown_update: Callable[[str, int, str], None],
+        transcript_segments: Optional[list[Any]] = None,
+    ) -> str | None:
+        if self.screenshot_agent_factory:
+            agent = self.screenshot_agent_factory()
+        else:
+            from app.services.visual_screenshot_agent import VisualScreenshotAgent
+            from app.utils.video_helper import generate_screenshot
+            from app.utils.video_reader import VideoReader
 
-        return NoteGenerator(generation_token=generation_token)
+            agent = VisualScreenshotAgent(
+                image_output_dir=DEFAULT_IMAGE_OUTPUT_DIR,
+                image_base_url=DEFAULT_IMAGE_BASE_URL,
+                video_reader_cls=VideoReader,
+                screenshot_func=generate_screenshot,
+            )
+
+        try:
+            return agent.insert_screenshots(
+                markdown,
+                video_path,
+                duration,
+                gpt,
+                on_markdown_update=on_markdown_update,
+                transcript_segments=transcript_segments,
+            )
+        except TypeError as exc:
+            if "transcript_segments" not in str(exc):
+                raise
+            return agent.insert_screenshots(
+                markdown,
+                video_path,
+                duration,
+                gpt,
+                on_markdown_update=on_markdown_update,
+            )
 
     def enhance_saved_note(
         self,
@@ -42,7 +82,6 @@ class VisualEnhancementService:
         gpt: Any = None,
     ) -> bool:
         result_path = self.note_output_dir / f"{task_id}.json"
-        status_writer = self._note_generator(generation_token)
         inserted_count = 0
 
         try:
@@ -55,7 +94,8 @@ class VisualEnhancementService:
                 result_path,
                 enhance_token,
                 generation_token,
-                status_writer,
+                self.note_output_dir,
+                self.status_writer,
                 task_id,
                 "ENHANCING",
                 message="Base note is ready; enhancing key screenshots asynchronously",
@@ -63,6 +103,8 @@ class VisualEnhancementService:
                 return False
 
             markdown = payload.get("markdown") or ""
+            transcript_payload = payload.get("transcript") or {}
+            transcript_segments = transcript_payload.get("segments") or []
             audio_meta = self._audio_meta_from_payload(payload.get("audio_meta") or {})
             audio_meta.duration = float(duration or audio_meta.duration or 0)
             audio_meta.platform = platform or audio_meta.platform
@@ -80,20 +122,20 @@ class VisualEnhancementService:
                     result_path,
                     enhance_token,
                     generation_token,
-                    status_writer,
+                    self.note_output_dir,
+                    self.status_writer,
                     task_id,
                     "ENHANCING",
                     message=f"正在增强截图：已插入 {inserted_count} 张关键截图（最近 {int(timestamp)} 秒）",
                 )
 
-            enhanced = self._note_generator(generation_token)._post_process_markdown(
+            enhanced = self._insert_screenshots(
                 markdown=markdown,
                 video_path=Path(video_path),
-                formats=["screenshot"],
-                audio_meta=audio_meta,
-                platform=audio_meta.platform,
+                duration=audio_meta.duration,
                 gpt=gpt,
                 on_markdown_update=_publish_increment,
+                transcript_segments=transcript_segments,
             )
 
             latest_payload = self._load_result(result_path)
@@ -102,14 +144,21 @@ class VisualEnhancementService:
                 return False
 
             if not enhanced or enhanced == markdown:
+                inserted_after = (enhanced or markdown).count("![](") - markdown.count("![](")
+                status_message = (
+                    "Note is ready; no additional key screenshot was needed"
+                    if inserted_after > 0
+                    else "Note is ready, but screenshot enhancement did not find a usable image"
+                )
                 self._update_status_if_current(
                     result_path,
                     enhance_token,
                     generation_token,
-                    status_writer,
+                    self.note_output_dir,
+                    self.status_writer,
                     task_id,
                     "SUCCESS",
-                    message="Note is ready; no additional key screenshot was needed",
+                    message=status_message,
                 )
                 return False
 
@@ -120,7 +169,8 @@ class VisualEnhancementService:
                 result_path,
                 enhance_token,
                 generation_token,
-                status_writer,
+                self.note_output_dir,
+                self.status_writer,
                 task_id,
                 "SUCCESS",
                 message="Note is ready; key screenshots have been enhanced",
@@ -137,7 +187,8 @@ class VisualEnhancementService:
                 result_path,
                 enhance_token,
                 generation_token,
-                status_writer,
+                self.note_output_dir,
+                self.status_writer,
                 task_id,
                 "SUCCESS",
                 message=f"Note is ready; screenshot enhancement failed: {exc}",
@@ -162,7 +213,8 @@ class VisualEnhancementService:
         result_path: Path,
         enhance_token: Optional[str],
         generation_token: Optional[str],
-        status_writer: Any,
+        note_output_dir: Path,
+        status_writer: Optional[Any],
         task_id: str,
         status: str,
         message: str,
@@ -170,7 +222,19 @@ class VisualEnhancementService:
         if enhance_token and not cls._has_current_token(result_path, enhance_token, generation_token):
             logger.info("Skip stale visual enhancement status update (task_id=%s)", task_id)
             return False
-        status_writer._update_status(task_id, status, message=message)
+        if status_writer:
+            status_writer._update_status(task_id, status, message=message)
+            return True
+
+        from app.services.note import NoteGenerator
+
+        NoteGenerator.write_status(
+            task_id,
+            status,
+            message=message,
+            generation_token=generation_token,
+            output_dir=note_output_dir,
+        )
         return True
 
     @staticmethod

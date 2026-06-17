@@ -119,6 +119,7 @@ class VideoReader:
         """Score a frame by visual usefulness: avoid blank, blurry, low-detail frames."""
         try:
             with Image.open(file_path) as img:
+                native_gray = img.convert("L")
                 rgb = img.convert("RGB").resize((160, 90), Image.Resampling.LANCZOS)
                 gray = rgb.convert("L")
                 hsv = rgb.convert("HSV")
@@ -130,6 +131,13 @@ class VideoReader:
                 edge_strength = ImageStat.Stat(edges).mean[0]
                 edge_pixels = sum(1 for value in edges.getdata() if value > 28)
                 edge_ratio = edge_pixels / max(1, gray.width * gray.height)
+                native_edges = native_gray.filter(ImageFilter.FIND_EDGES)
+                native_edge_values = list(native_edges.getdata())
+                sharp_edge_ratio = sum(1 for value in native_edge_values if value > 36) / max(
+                    1,
+                    len(native_edge_values),
+                )
+                sharp_edge_strength = ImageStat.Stat(native_edges).mean[0]
                 saturation = hsv.getchannel("S")
                 value = hsv.getchannel("V")
                 saturation_data = list(saturation.getdata())
@@ -155,6 +163,7 @@ class VideoReader:
         entropy_score = min(entropy / 6, 1)
         edge_score = min(edge_strength / 18, 1)
         edge_coverage_score = min(edge_ratio / 0.18, 1)
+        sharpness_score = min((sharp_edge_strength / 22) * 0.55 + (sharp_edge_ratio / 0.10) * 0.45, 1)
         foreground_signal = colorful_ratio + bright_foreground_ratio + min(dark_foreground_ratio, 0.25)
         foreground_score = min(foreground_signal / 0.18, 1)
         color_score = min(colorful_ratio / 0.18, 1)
@@ -162,10 +171,11 @@ class VideoReader:
             brightness_score * 0.05
             + contrast_score * 0.12
             + entropy_score * 0.14
-            + edge_score * 0.14
-            + edge_coverage_score * 0.15
-            + foreground_score * 0.28
-            + color_score * 0.12
+            + edge_score * 0.10
+            + edge_coverage_score * 0.11
+            + sharpness_score * 0.16
+            + foreground_score * 0.25
+            + color_score * 0.07
         )
         if foreground_signal < 0.08:
             score *= foreground_signal / 0.08
@@ -173,6 +183,8 @@ class VideoReader:
             score *= 0.25
         if edge_ratio < 0.025 and foreground_signal < 0.12:
             score *= 0.55
+        if sharp_edge_strength < 5 and sharp_edge_ratio < 0.018:
+            score *= 0.45
         return score, perceptual_hash
 
     def format_time(self, seconds: float) -> str:
@@ -399,13 +411,13 @@ class VideoReader:
         logger.info("Starting video frame extraction...")
         try:
             with self._run_lock():
-            # 纭繚鐩綍瀛樺湪
+            # 确保目录存在
                 os.makedirs(self.frame_dir, exist_ok=True)
                 os.makedirs(self.grid_dir, exist_ok=True)
-            #娓呯┖甯ф枃浠跺す
+            # 清空帧文件夹
                 shutil.rmtree(self.frame_dir, ignore_errors=True)
                 os.makedirs(self.frame_dir, exist_ok=True)
-            #娓呯┖缃戞牸鏂囦欢澶?
+            # 清空网格文件夹
                 shutil.rmtree(self.grid_dir, ignore_errors=True)
                 os.makedirs(self.grid_dir, exist_ok=True)
                 max_selected_frames = None

@@ -16,6 +16,12 @@ from app.models.transcriber_model import TranscriptResult, TranscriptSegment
 from app.utils.path_helper import get_data_dir
 from app.utils.url_parser import extract_video_id
 from app.services.cookie_manager import CookieConfigManager
+from app.utils.video_quality import (
+    cleanup_quarantined_video,
+    is_screenshot_ready_video,
+    quarantine_low_quality_video,
+    restore_quarantined_video,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +29,6 @@ BILIBILI_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
-
-
 class BilibiliDownloader(Downloader, ABC):
     def __init__(self):
         super().__init__()
@@ -257,8 +261,10 @@ class BilibiliDownloader(Downloader, ABC):
         videos = sorted(
             videos,
             key=lambda item: (
-                0 if (item.get("id") or 0) <= 32 else 1,
-                item.get("bandwidth") or 0,
+                1 if ((item.get("width") or 0) > 1920 or (item.get("height") or 0) > 1080) else 0,
+                abs(min(item.get("width") or 0, 1920) - 1920),
+                abs(min(item.get("height") or 0, 1080) - 1080),
+                -(item.get("bandwidth") or 0),
             ),
         )
         video_id = info.get("id")
@@ -338,8 +344,9 @@ class BilibiliDownloader(Downloader, ABC):
         print("video_url",video_url)
         video_id=extract_video_id(video_url, "bilibili")
         video_path = os.path.join(output_dir, f"{video_id}.mp4")
-        if os.path.exists(video_path):
+        if os.path.exists(video_path) and is_screenshot_ready_video(video_path):
             return video_path
+        low_quality_cache_path = quarantine_low_quality_video(video_path)
 
         # 检查是否已经存在
 
@@ -364,10 +371,19 @@ class BilibiliDownloader(Downloader, ABC):
                 video_path = os.path.join(output_dir, f"{video_id}.mp4")
         except Exception:
             logger.warning("yt-dlp 下载 B 站视频失败，切换到 B 站 API 兜底下载", exc_info=True)
-            video_path = self._download_video_via_api(video_url, output_dir)
+            try:
+                video_path = self._download_video_via_api(video_url, output_dir)
+            except Exception:
+                restore_quarantined_video(low_quality_cache_path, video_path)
+                raise
 
         if not os.path.exists(video_path):
+            restore_quarantined_video(low_quality_cache_path, video_path)
             raise FileNotFoundError(f"视频文件未找到: {video_path}")
+        if not is_screenshot_ready_video(video_path):
+            restore_quarantined_video(low_quality_cache_path, video_path)
+            raise RuntimeError("下载的视频清晰度不足，无法生成清晰截图")
+        cleanup_quarantined_video(low_quality_cache_path)
 
         return video_path
 

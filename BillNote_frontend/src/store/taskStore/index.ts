@@ -50,6 +50,8 @@ export interface Markdown {
 
 export interface Task {
   id: string
+  generationToken?: string
+  isRetrySubmitting?: boolean
   markdown: string|Markdown [] //为了兼容之前的笔记
   transcript: Transcript
   status: TaskStatus
@@ -70,7 +72,7 @@ export interface Task {
 interface TaskStore {
   tasks: Task[]
   currentTaskId: string | null
-  addPendingTask: (taskId: string, platform: string) => void
+  addPendingTask: (taskId: string, platform: string, formData?: any, generationToken?: string) => void
   updateTaskContent: (id: string, data: Partial<Omit<Task, 'id' | 'createdAt'>>) => void
   removeTask: (id: string) => void
   clearTasks: () => void
@@ -85,13 +87,14 @@ export const useTaskStore = create<TaskStore>()(
       tasks: [],
       currentTaskId: null,
 
-      addPendingTask: (taskId: string, platform: string, formData: any) =>
+      addPendingTask: (taskId: string, platform: string, formData: any, generationToken?: string) =>
 
         set(state => ({
           tasks: [
             {
               formData: formData,
               id: taskId,
+              generationToken,
               status: 'PENDING',
               markdown: '',
               platform: platform,
@@ -121,8 +124,6 @@ export const useTaskStore = create<TaskStore>()(
           set(state => ({
             tasks: state.tasks.map(task => {
               if (task.id !== id) return task
-
-              if (task.status === 'SUCCESS' && data.status === 'SUCCESS') return task
 
               // 如果是 markdown 字符串，封装为版本
               if (typeof data.markdown === 'string') {
@@ -191,6 +192,7 @@ export const useTaskStore = create<TaskStore>()(
         const newFormData = payload || task.formData
         const previousStatus = task.status
         const previousMessage = task.message
+        const previousGenerationToken = task.generationToken
         set(state => ({
           tasks: state.tasks.map(t =>
               t.id === id
@@ -198,16 +200,34 @@ export const useTaskStore = create<TaskStore>()(
                     ...t,
                     formData: newFormData,
                     status: 'PENDING',
+                    generationToken: undefined,
+                    isRetrySubmitting: true,
                     message: '正在提交重新生成请求...',
                   }
                   : t
           ),
         }))
         try {
-          await generateNote({
+          const response = await generateNote({
             ...newFormData,
             task_id: id,
           })
+          const generationToken = response?.generation_token
+          if (!generationToken) {
+            toast.error('后端未返回 generation_token，请重启后端并确认已运行最新代码')
+            throw new Error('Regeneration response is missing generation_token')
+          }
+          set(state => ({
+            tasks: state.tasks.map(t =>
+                t.id === id
+                    ? {
+                      ...t,
+                      generationToken,
+                      isRetrySubmitting: false,
+                    }
+                    : t
+            ),
+          }))
         } catch (e: any) {
           set(state => ({
             tasks: state.tasks.map(t =>
@@ -216,6 +236,8 @@ export const useTaskStore = create<TaskStore>()(
                       ...t,
                       status: previousStatus,
                       message: previousMessage,
+                      generationToken: previousGenerationToken,
+                      isRetrySubmitting: false,
                     }
                     : t
             ),
@@ -242,6 +264,8 @@ export const useTaskStore = create<TaskStore>()(
                     formData: newFormData, // ✅ 显式更新 formData
                     status: 'PENDING',
                     message: '任务已提交，等待后端开始处理...',
+                    generationToken: t.generationToken,
+                    isRetrySubmitting: false,
                   }
                   : t
           ),

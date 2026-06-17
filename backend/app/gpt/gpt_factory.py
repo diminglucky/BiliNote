@@ -1,4 +1,3 @@
-from openai import OpenAI
 
 from app.gpt.base import GPT
 from app.gpt.model_capabilities import infer_model_capabilities

@@ -2,7 +2,7 @@ import os
 import platform
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional
 from app.utils.response import ResponseWrapper as R

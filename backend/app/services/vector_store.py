@@ -1,7 +1,6 @@
 import json
 import os
 import re
-from typing import Optional
 
 import chromadb
 from chromadb.config import Settings

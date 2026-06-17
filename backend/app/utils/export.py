@@ -1,6 +1,5 @@
 import os
 import re
-from urllib.parse import quote
 from markdown_pdf import MarkdownPdf, Section
 from dotenv import load_dotenv
 

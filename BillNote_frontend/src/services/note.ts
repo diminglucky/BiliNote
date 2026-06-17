@@ -1,6 +1,11 @@
 import request from '@/utils/request'
 import toast from 'react-hot-toast'
 
+export interface GenerateNoteResponse {
+  task_id: string
+  generation_token: string
+}
+
 export const generateNote = async (data: {
   video_url: string
   platform: string
@@ -14,21 +19,21 @@ export const generateNote = async (data: {
   video_understanding?: boolean
   video_interval?: number
   grid_size: Array<number>
-}) => {
+}): Promise<GenerateNoteResponse> => {
   try {
     console.log('generateNote', data)
-    const response = await request.post('/generate_note', data, { timeout: 60000 })
+    const response = await request.post('/generate_note', data, { timeout: 60000 }) as GenerateNoteResponse | null
 
     if (!response) {
-      if (response.data.msg) {
-        toast.error(response.data.msg)
-      }
-      return null
+      throw new Error('Generate note response is empty')
     }
-    toast.success('笔记生成任务已提交！')
+
+    if (!response.task_id || !response.generation_token) {
+      toast.error('后端未返回 generation_token，请重启后端并确认已运行最新代码')
+      throw new Error('Generate note response is missing task_id or generation_token')
+    }
 
     console.log('res', response)
-    // 成功提示
 
     return response
   } catch (e: any) {
@@ -59,11 +64,12 @@ export const delete_task = async ({ video_id, platform }) => {
   }
 }
 
-export const get_task_status = async (task_id: string) => {
+export const get_task_status = async (task_id: string, generation_token?: string) => {
   try {
     // 成功提示
 
-    return await request.get('/task_status/' + task_id, { suppressToast: true })
+    const query = generation_token ? `?generation_token=${encodeURIComponent(generation_token)}` : ''
+    return await request.get('/task_status/' + task_id + query, { suppressToast: true })
   } catch (e) {
     console.error('❌ 请求出错', e)
 

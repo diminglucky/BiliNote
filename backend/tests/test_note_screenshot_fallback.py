@@ -17,6 +17,49 @@ if str(ROOT) not in sys.path:
 
 
 def _install_stubs():
+    stub_names = {
+        "app",
+        "app.services",
+        "app.utils",
+        "fastapi",
+        "dotenv",
+        "app.downloaders",
+        "app.downloaders.base",
+        "app.downloaders.bilibili_downloader",
+        "app.downloaders.douyin_downloader",
+        "app.downloaders.local_downloader",
+        "app.downloaders.youtube_downloader",
+        "app.db",
+        "app.db.video_task_dao",
+        "app.enmus",
+        "app.enmus.exception",
+        "app.enmus.task_status_enums",
+        "app.enmus.note_enums",
+        "app.exceptions",
+        "app.exceptions.note",
+        "app.exceptions.provider",
+        "app.gpt",
+        "app.gpt.base",
+        "app.gpt.gpt_factory",
+        "app.models",
+        "app.models.audio_model",
+        "app.models.gpt_model",
+        "app.models.model_config",
+        "app.models.notes_model",
+        "app.models.transcriber_model",
+        "app.services.constant",
+        "app.services.provider",
+        "app.transcriber",
+        "app.transcriber.base",
+        "app.transcriber.transcriber_provider",
+        "app.utils.note_helper",
+        "app.utils.status_code",
+        "app.utils.video_helper",
+        "app.utils.video_reader",
+    }
+    before_keys = set(sys.modules)
+    previous_modules = {name: sys.modules.get(name) for name in stub_names}
+
     app_mod = types.ModuleType("app")
     app_mod.__path__ = [str(ROOT / "app")]
     services_mod = types.ModuleType("app.services")
@@ -120,9 +163,18 @@ def _install_stubs():
 
     modules["app.utils.video_reader"].FrameCandidate = _FrameCandidate
     modules["app.utils.video_reader"].VideoReader = _VideoReader
+    return previous_modules, before_keys
 
 
-_install_stubs()
+def _restore_stubs(previous_modules, before_keys):
+    for name in list(sys.modules):
+        if name not in before_keys and (name == "app" or name.startswith("app.") or name in {"fastapi", "dotenv"}):
+            sys.modules.pop(name, None)
+    for name, module in previous_modules.items():
+        if module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
 
 
 def _load_note_module():
@@ -131,23 +183,33 @@ def _load_note_module():
     if spec is None or spec.loader is None:
         raise ImportError("note module spec not found")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    previous_modules, before_keys = _install_stubs()
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        _restore_stubs(previous_modules, before_keys)
     return module
 
 
 note_module = _load_note_module()
 NoteGenerator = note_module.NoteGenerator
-VisualScreenshotAgent = note_module.VisualScreenshotAgent
-VisualScreenshotState = note_module.VisualScreenshotState
-visual_agent_module = sys.modules["app.services.visual_screenshot_agent"]
+from app.services.visual_screenshot_agent import VisualScreenshotAgent, VisualScreenshotState
+from app.utils.video_reader import FrameCandidate
 
 
 class TestNoteScreenshotFallback(unittest.TestCase):
     def setUp(self):
-        self._graph_runner_patch = patch.object(
-            visual_agent_module,
-            "run_visual_screenshot_graph",
-            side_effect=lambda agent, state: agent.run_nodes_inline(state),
+        global agent
+        self.agent = VisualScreenshotAgent(
+            image_output_dir=note_module.IMAGE_OUTPUT_DIR,
+            image_base_url=note_module.IMAGE_BASE_URL,
+            video_reader_cls=lambda *args, **kwargs: note_module.VideoReader(*args, **kwargs),
+            screenshot_func=lambda *args, **kwargs: note_module.generate_screenshot(*args, **kwargs),
+        )
+        agent = self.agent
+        self._graph_runner_patch = patch.dict(
+            VisualScreenshotAgent.run.__globals__,
+            {"run_visual_screenshot_graph": lambda agent, state: agent.run_nodes_inline(state)},
         )
         self._graph_runner_patch.start()
         self._graph_runner_patch_active = True
@@ -168,7 +230,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
 
         generator = NoteGenerator.__new__(NoteGenerator)
         with patch.object(note_module, "VideoReader", _Reader):
-            result = generator._fallback_screenshot_timestamps(pathlib.Path("video.mp4"), 600)
+            result = agent.fallback_screenshot_timestamps(pathlib.Path("video.mp4"), 600)
 
         self.assertEqual(result, expected)
 
@@ -183,7 +245,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
         generator = NoteGenerator.__new__(NoteGenerator)
         with patch.object(note_module, "VideoReader", _Reader):
             with self.assertRaisesRegex(RuntimeError, "视觉截图时间点提取失败"):
-                generator._fallback_screenshot_timestamps(pathlib.Path("video.mp4"), 100)
+                agent.fallback_screenshot_timestamps(pathlib.Path("video.mp4"), 100)
 
     def test_fallback_timestamp_scan_empty_result_is_explicit(self):
         class _Reader:
@@ -196,11 +258,11 @@ class TestNoteScreenshotFallback(unittest.TestCase):
         generator = NoteGenerator.__new__(NoteGenerator)
         with patch.object(note_module, "VideoReader", _Reader):
             with self.assertRaisesRegex(RuntimeError, "视觉截图时间点提取失败"):
-                generator._fallback_screenshot_timestamps(pathlib.Path("video.mp4"), 100)
+                agent.fallback_screenshot_timestamps(pathlib.Path("video.mp4"), 100)
 
     def test_sampling_interval_grows_for_long_videos(self):
-        self.assertEqual(NoteGenerator._fallback_sampling_interval(5 * 60), 6)
-        self.assertGreater(NoteGenerator._fallback_sampling_interval(4 * 60 * 60), 20)
+        self.assertEqual(VisualScreenshotAgent.fallback_sampling_interval(5 * 60), 6)
+        self.assertGreater(VisualScreenshotAgent.fallback_sampling_interval(4 * 60 * 60), 20)
 
     def test_visual_agent_run_exposes_state(self):
         agent = VisualScreenshotAgent(image_output_dir=".", image_base_url="/static/screenshots")
@@ -230,7 +292,10 @@ class TestNoteScreenshotFallback(unittest.TestCase):
 
         self._graph_runner_patch.stop()
         self._graph_runner_patch_active = False
-        with patch.object(visual_agent_module, "run_visual_screenshot_graph", side_effect=RuntimeError("graph down")):
+        with patch.dict(
+            VisualScreenshotAgent.run.__globals__,
+            {"run_visual_screenshot_graph": lambda _agent, _state: (_ for _ in ()).throw(RuntimeError("graph down"))},
+        ):
             with self.assertRaisesRegex(RuntimeError, "graph down"):
                 agent.run(state)
         self._graph_runner_patch.start()
@@ -241,9 +306,14 @@ class TestNoteScreenshotFallback(unittest.TestCase):
     def test_post_process_markdown_propagates_screenshot_errors(self):
         generator = NoteGenerator.__new__(NoteGenerator)
         audio_meta = type("_AudioMeta", (), {"duration": 120, "video_id": "BV1xx"})()
+        screenshot_agent = type(
+            "_ScreenshotAgent",
+            (),
+            {"insert_screenshots": lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("graph failed"))},
+        )()
+        generator._visual_screenshot_agent = lambda: screenshot_agent
 
-        with patch.object(generator, "_insert_screenshots", side_effect=RuntimeError("graph failed")), \
-                patch.object(note_module.logger, "exception"):
+        with patch.object(note_module.logger, "exception"):
             with self.assertRaisesRegex(RuntimeError, "graph failed"):
                 generator._post_process_markdown(
                     markdown="## Demo *Content-[00:10]\n",
@@ -320,7 +390,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             "这里讲第二部分。\n"
         )
 
-        result = generator._insert_fallback_images_near_sections(
+        result = agent.insert_fallback_images_near_sections(
             markdown,
             [(12, "![](/static/screenshots/a.jpg)"), (70, "![](/static/screenshots/b.jpg)")],
         )
@@ -338,7 +408,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
     def test_fallback_images_append_when_content_markers_are_missing(self):
         generator = NoteGenerator.__new__(NoteGenerator)
 
-        result = generator._insert_fallback_images_near_sections(
+        result = agent.insert_fallback_images_near_sections(
             "## 无时间线\n正文",
             [(12, "![](/static/screenshots/a.jpg)")],
         )
@@ -357,7 +427,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             "A short text summary.\n"
         )
 
-        plans = generator._plan_visual_screenshots(markdown, 240)
+        plans = agent.plan_visual_screenshots(markdown, 240)
 
         self.assertEqual(len(plans), 1)
         self.assertEqual(plans[0].title, "Architecture diagram")
@@ -371,7 +441,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             "This flow diagram explains a plan model, replan model, execution agent, and UI result.\n"
         )
 
-        markers = NoteGenerator._content_line_markers(markdown)
+        markers = VisualScreenshotAgent.content_line_markers(markdown)
 
         self.assertEqual(markers, [(3, 1224)])
 
@@ -384,7 +454,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             "The final section lists a few text-only points.\n"
         )
 
-        plans = generator._plan_visual_screenshots(markdown, 120)
+        plans = agent.plan_visual_screenshots(markdown, 120)
 
         self.assertEqual(plans, [])
 
@@ -400,21 +470,21 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             "This flow diagram explains the tool calling process.\n"
         )
 
-        plans = generator._plan_visual_screenshots(markdown, 180)
+        plans = agent.plan_visual_screenshots(markdown, 180)
 
-        self.assertEqual(len(plans), 1)
-        self.assertEqual(plans[0].title, "Flow diagram")
-        self.assertGreaterEqual(plans[0].start, 60)
+        self.assertEqual(len(plans), 2)
+        self.assertTrue(all(plan.title == "Flow diagram" for plan in plans))
+        self.assertTrue(all(plan.start >= 60 for plan in plans))
 
     def test_screenshot_marker_text_does_not_count_as_visual_keyword(self):
-        score, reasons = NoteGenerator._visual_keyword_score(
+        score, reasons = VisualScreenshotAgent.visual_keyword_score(
             "Only a generated marker appears here: *Screenshot-[00:10]*"
         )
 
         self.assertEqual(score, 0)
         self.assertEqual(reasons, [])
 
-    def test_structure_filter_keeps_one_marker_per_visual_section(self):
+    def test_structure_filter_can_keep_multiple_markers_for_dense_visual_section(self):
         generator = NoteGenerator.__new__(NoteGenerator)
         markdown = (
             "## Code walkthrough\n"
@@ -423,18 +493,18 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             "*Screenshot-[01:40]\n"
             "This code demo explains a command and its running result.\n"
         )
-        matches = generator._extract_screenshot_timestamps(markdown)
-        plans = generator._plan_visual_screenshots(markdown, 180)
+        matches = agent.extract_screenshot_timestamps(markdown)
+        plans = agent.plan_visual_screenshots(markdown, 180)
 
-        filtered_markdown, filtered = generator._filter_screenshot_matches_by_structure(
+        filtered_markdown, filtered = agent.filter_screenshot_matches_by_structure(
             markdown,
             matches,
             plans,
         )
 
-        self.assertEqual(len(plans), 1)
-        self.assertEqual(len(filtered), 1)
-        self.assertEqual(filtered_markdown.count("Screenshot-"), 1)
+        self.assertEqual(len(plans), 3)
+        self.assertEqual(len(filtered), 3)
+        self.assertEqual(filtered_markdown.count("Screenshot-"), 3)
 
     def test_dense_visual_section_can_keep_multiple_markers(self):
         generator = NoteGenerator.__new__(NoteGenerator)
@@ -451,10 +521,10 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             "## Next section *Content-[10:00]\n"
             "Plain text.\n"
         )
-        matches = generator._extract_screenshot_timestamps(markdown)
-        plans = generator._plan_visual_screenshots(markdown, 900)
+        matches = agent.extract_screenshot_timestamps(markdown)
+        plans = agent.plan_visual_screenshots(markdown, 900)
 
-        filtered_markdown, filtered = generator._filter_screenshot_matches_by_structure(
+        filtered_markdown, filtered = agent.filter_screenshot_matches_by_structure(
             markdown,
             matches,
             plans,
@@ -482,7 +552,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             "普通总结。"
         )
 
-        plans = generator._plan_visual_screenshots(markdown, 1800)
+        plans = agent.plan_visual_screenshots(markdown, 1800)
 
         plan_section = [plan for plan in plans if plan.title == "Plan and Execute 模式详解"]
         self.assertGreaterEqual(len(plan_section), 2)
@@ -519,7 +589,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             with patch.object(note_module, "IMAGE_OUTPUT_DIR", pathlib.Path(tmp_dir)), \
                     patch.object(note_module, "VideoReader", _Reader), \
                     patch.object(note_module, "generate_screenshot", side_effect=_generate):
-                result = generator._insert_screenshots(
+                result = agent.insert_screenshots(
                     (
                         "## UI demo *Content-[00:00]\n"
                         "This screen demo shows a UI and code walkthrough.\n"
@@ -545,7 +615,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
         )
 
         with patch.object(note_module, "generate_screenshot", side_effect=_generate):
-            result = generator._insert_screenshots(markdown, pathlib.Path("video.mp4"), 60)
+            result = agent.insert_screenshots(markdown, pathlib.Path("video.mp4"), 60)
 
         self.assertNotIn("*Screenshot", result)
         self.assertNotIn("![](", result)
@@ -576,7 +646,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
 
             with patch.object(note_module, "IMAGE_OUTPUT_DIR", pathlib.Path(tmp_dir)), \
                     patch.object(note_module, "generate_screenshot", side_effect=_generate):
-                candidate = generator._best_screenshot_near_timestamp(
+                candidate = agent.best_screenshot_near_timestamp(
                     video_path=pathlib.Path("video.mp4"),
                     timestamp=0,
                     duration=120,
@@ -637,7 +707,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
 
             with patch.object(note_module, "IMAGE_OUTPUT_DIR", pathlib.Path(tmp_dir)), \
                     patch.object(note_module, "generate_screenshot", side_effect=_generate):
-                candidate = generator._best_screenshot_near_timestamp(
+                candidate = agent.best_screenshot_near_timestamp(
                     video_path=pathlib.Path("video.mp4"),
                     timestamp=0,
                     duration=120,
@@ -698,7 +768,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
 
             with patch.object(note_module, "IMAGE_OUTPUT_DIR", pathlib.Path(tmp_dir)), \
                     patch.object(note_module, "generate_screenshot", side_effect=_generate):
-                candidate = generator._best_screenshot_near_timestamp(
+                candidate = agent.best_screenshot_near_timestamp(
                     video_path=pathlib.Path("video.mp4"),
                     timestamp=0,
                     duration=160,
@@ -759,7 +829,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
 
             with patch.object(note_module, "IMAGE_OUTPUT_DIR", pathlib.Path(tmp_dir)), \
                     patch.object(note_module, "generate_screenshot", side_effect=_generate):
-                candidate = generator._best_screenshot_near_timestamp(
+                candidate = agent.best_screenshot_near_timestamp(
                     video_path=pathlib.Path("video.mp4"),
                     timestamp=0,
                     duration=160,
@@ -809,11 +879,11 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             first.write_bytes(b"first")
             second.write_bytes(b"second")
             candidates = [
-                note_module.FrameCandidate(str(first), 10, 0.95, "first", 1),
-                note_module.FrameCandidate(str(second), 40, 0.75, "second", 2),
+                FrameCandidate(str(first), 10, 0.95, "first", 1),
+                FrameCandidate(str(second), 40, 0.75, "second", 2),
             ]
 
-            chosen = generator._review_screenshot_candidates(
+            chosen = agent.review_screenshot_candidates(
                 candidates,
                 _Gpt(),
                 section_title="Plan and Execute",
@@ -832,9 +902,9 @@ class TestNoteScreenshotFallback(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = pathlib.Path(tmp_dir) / "frame.jpg"
             path.write_bytes(b"frame")
-            candidates = [note_module.FrameCandidate(str(path), 10, 0.9, "a", 1)]
+            candidates = [FrameCandidate(str(path), 10, 0.9, "a", 1)]
 
-            chosen = generator._review_screenshot_candidates(candidates, _Gpt())
+            chosen = agent.review_screenshot_candidates(candidates, _Gpt())
 
         self.assertIsNone(chosen)
 
@@ -865,12 +935,12 @@ class TestNoteScreenshotFallback(unittest.TestCase):
                     patch.object(note_module, "IMAGE_OUTPUT_DIR", pathlib.Path(tmp_dir)), \
                     patch.object(note_module, "generate_screenshot", side_effect=_generate), \
                     patch.object(
-                        visual_agent_module.VisualScreenshotAgent,
+                        VisualScreenshotAgent,
                         "review_screenshot_candidates",
                         side_effect=AssertionError("review should be disabled by default"),
                     ):
                 os.environ.pop("SCREENSHOT_REVIEW_MODE", None)
-                candidate = generator._best_screenshot_near_timestamp(
+                candidate = agent.best_screenshot_near_timestamp(
                     video_path=pathlib.Path("video.mp4"),
                     timestamp=0,
                     duration=60,
@@ -909,11 +979,11 @@ class TestNoteScreenshotFallback(unittest.TestCase):
                     patch.object(note_module, "IMAGE_OUTPUT_DIR", pathlib.Path(tmp_dir)), \
                     patch.object(note_module, "generate_screenshot", side_effect=_generate), \
                     patch.object(
-                        visual_agent_module.VisualScreenshotAgent,
+                        VisualScreenshotAgent,
                         "review_screenshot_candidates",
                         side_effect=AssertionError("balanced mode should skip clear low-value selections"),
                     ):
-                candidate = generator._best_screenshot_near_timestamp(
+                candidate = agent.best_screenshot_near_timestamp(
                     video_path=pathlib.Path("video.mp4"),
                     timestamp=0,
                     duration=60,
@@ -960,11 +1030,11 @@ class TestNoteScreenshotFallback(unittest.TestCase):
                     patch.object(note_module, "IMAGE_OUTPUT_DIR", pathlib.Path(tmp_dir)), \
                     patch.object(note_module, "generate_screenshot", side_effect=_generate), \
                     patch.object(
-                        visual_agent_module.VisualScreenshotAgent,
+                        VisualScreenshotAgent,
                         "review_screenshot_candidates",
                         _review,
                     ):
-                candidate = generator._best_screenshot_near_timestamp(
+                candidate = agent.best_screenshot_near_timestamp(
                     video_path=pathlib.Path("video.mp4"),
                     timestamp=0,
                     duration=80,
@@ -980,7 +1050,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
         self.assertGreaterEqual(candidate.timestamp, 40)
 
     def test_balanced_review_respects_vision_review_limit(self):
-        agent = visual_agent_module.VisualScreenshotAgent(image_output_dir=".", image_base_url="/static/screenshots")
+        agent = VisualScreenshotAgent(image_output_dir=".", image_base_url="/static/screenshots")
         agent._vision_review_count = 1
 
         class _Gpt:
@@ -992,7 +1062,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             self.assertFalse(agent.can_use_vision_review("balanced", _Gpt()))
 
     def test_balanced_review_reservation_is_limited_atomically(self):
-        agent = visual_agent_module.VisualScreenshotAgent(image_output_dir=".", image_base_url="/static/screenshots")
+        agent = VisualScreenshotAgent(image_output_dir=".", image_base_url="/static/screenshots")
 
         class _Gpt:
             supports_vision = True
@@ -1033,7 +1103,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             def _review(_self, *_args, **_kwargs):
                 return None
 
-            agent = visual_agent_module.VisualScreenshotAgent(
+            agent = VisualScreenshotAgent(
                 image_output_dir=tmp_dir,
                 image_base_url="/static/screenshots",
                 video_reader_cls=_Reader,
@@ -1041,7 +1111,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             )
             with patch.dict(os.environ, {"SCREENSHOT_REVIEW_MODE": "balanced"}, clear=False), \
                     patch.object(
-                        visual_agent_module.VisualScreenshotAgent,
+                        VisualScreenshotAgent,
                         "review_screenshot_candidates",
                         _review,
                     ):
@@ -1088,12 +1158,12 @@ class TestNoteScreenshotFallback(unittest.TestCase):
                     patch.object(note_module, "IMAGE_OUTPUT_DIR", pathlib.Path(tmp_dir)), \
                     patch.object(note_module, "generate_screenshot", side_effect=_generate), \
                     patch.object(
-                        visual_agent_module.VisualScreenshotAgent,
+                        VisualScreenshotAgent,
                         "review_screenshot_candidates",
                         return_value=None,
                     ):
                 with self.assertRaisesRegex(RuntimeError, "多模态截图评审未返回可用结果"):
-                    generator._best_screenshot_near_timestamp(
+                    agent.best_screenshot_near_timestamp(
                         video_path=pathlib.Path("video.mp4"),
                         timestamp=0,
                         duration=60,
@@ -1126,7 +1196,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
 
             with patch.object(note_module, "IMAGE_OUTPUT_DIR", pathlib.Path(tmp_dir)), \
                     patch.object(note_module, "generate_screenshot", side_effect=_generate):
-                candidate = generator._best_screenshot_near_timestamp(
+                candidate = agent.best_screenshot_near_timestamp(
                     video_path=pathlib.Path("video.mp4"),
                     timestamp=100,
                     duration=200,
@@ -1264,3 +1334,4 @@ class TestNoteScreenshotFallback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

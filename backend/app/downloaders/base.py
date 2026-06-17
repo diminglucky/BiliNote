@@ -1,4 +1,3 @@
-import enum
 
 from abc import ABC, abstractmethod
 from typing import Optional, Union
@@ -32,7 +31,6 @@ class Downloader(ABC):
         :param quality: 音频质量 fast | medium | slow
         :return:返回一个 AudioDownloadResult 类
         '''
-        pass
 
     @staticmethod
     def download_video(self, video_url: str,

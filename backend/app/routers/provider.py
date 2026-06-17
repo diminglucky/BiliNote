@@ -2,8 +2,6 @@ from typing import Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.exceptions.provider import ProviderError
-from app.models.model_config import ModelConfig
 from app.services.model import ModelService
 from app.utils.response import ResponseWrapper as R
 from app.services.provider import ProviderService
