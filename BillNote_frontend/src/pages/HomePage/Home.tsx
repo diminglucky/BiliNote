@@ -4,6 +4,7 @@ import NoteForm from '@/pages/HomePage/components/NoteForm.tsx'
 import MarkdownViewer from '@/pages/HomePage/components/MarkdownViewer.tsx'
 import { useTaskStore } from '@/store/taskStore'
 import History from '@/pages/HomePage/components/History.tsx'
+import { isContentReadyTaskStatus, isFailedTaskStatus } from '@/models/taskStateMachine'
 type ViewStatus = 'idle' | 'loading' | 'success' | 'failed'
 export const HomePage: FC = () => {
   const tasks = useTaskStore(state => state.tasks)
@@ -13,24 +14,18 @@ export const HomePage: FC = () => {
 
   const [status, setStatus] = useState<ViewStatus>('idle')
   const hasRenderableContent = Boolean(
-    currentTask &&
-      (Array.isArray(currentTask.markdown)
-        ? currentTask.markdown.length > 0
-        : typeof currentTask.markdown === 'string'
-          ? currentTask.markdown.trim()
-          : false),
+    currentTask && currentTask.markdown.length > 0,
   )
 
   useEffect(() => {
     if (!currentTask) {
       setStatus('idle')
     } else if (
-      currentTask.status === 'SUCCESS' ||
-      currentTask.status === 'ENHANCING' ||
+      isContentReadyTaskStatus(currentTask.status) ||
       hasRenderableContent
     ) {
       setStatus('success')
-    } else if (currentTask.status === 'FAILED') {
+    } else if (isFailedTaskStatus(currentTask.status)) {
       setStatus('failed')
     } else {
       // PENDING、PARSING、DOWNLOADING、TRANSCRIBING、SUMMARIZING 等所有进行中状态

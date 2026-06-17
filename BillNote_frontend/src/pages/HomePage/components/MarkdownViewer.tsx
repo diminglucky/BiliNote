@@ -26,6 +26,7 @@ import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
 import MarkmapEditor from '@/pages/HomePage/components/MarkmapComponent.tsx'
 import ChatPanel from '@/pages/HomePage/components/ChatPanel.tsx'
 import VideoBanner from '@/pages/HomePage/components/VideoBanner.tsx'
+import { isRunningTaskStatus, taskStatusMessage, taskSteps } from '@/models/taskStateMachine'
 
 interface VersionNote {
   ver_id: string
@@ -38,16 +39,6 @@ interface VersionNote {
 interface MarkdownViewerProps {
   status: 'idle' | 'loading' | 'success' | 'failed'
 }
-
-const steps = [
-  { label: '解析链接', key: 'PARSING' },
-  { label: '下载音频', key: 'DOWNLOADING' },
-  { label: '转写文字', key: 'TRANSCRIBING' },
-  { label: '总结内容', key: 'SUMMARIZING' },
-  { label: '整理截图', key: 'FORMATTING' },
-  { label: '增强截图', key: 'ENHANCING' },
-  { label: '保存完成', key: 'SUCCESS' },
-]
 
 const remarkPlugins = [gfm, remarkMath]
 const rehypePlugins = [rehypeKatex, rehypeSlug]
@@ -427,57 +418,37 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const taskStatus = currentTask?.status || 'PENDING'
   const taskMessage = currentTask?.message
   const retryTask = useTaskStore.getState().retryTask
-  const currentMarkdown = currentTask?.markdown
-  const isMultiVersion = Array.isArray(currentMarkdown)
   const markdownVersions = useMemo(
-    () => (Array.isArray(currentMarkdown) ? currentMarkdown : []),
-    [currentMarkdown],
+    () => currentTask?.markdown || [],
+    [currentTask?.markdown],
   )
   const currentFormData = currentTask?.formData
   const currentCreatedAt = currentTask?.createdAt
   const [showTranscribe, setShowTranscribe] = useState(false)
   const [showChat, setShowChat] = useState<false | 'half' | 'full'>(false)
   const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
-  const isTaskRunning = currentTask && !['SUCCESS', 'FAILED'].includes(taskStatus)
-  const runningMessage =
-    taskMessage ||
-    (taskStatus === 'ENHANCING'
-      ? '\u6b63\u5728\u9010\u5f20\u63d2\u5165\u5173\u952e\u622a\u56fe\uff0c\u7b14\u8bb0\u5185\u5bb9\u4f1a\u81ea\u52a8\u66f4\u65b0'
-      : '\u6b63\u5728\u91cd\u65b0\u751f\u6210\uff0c\u65e7\u7b14\u8bb0\u4f1a\u4fdd\u7559\u5230\u65b0\u7248\u672c\u5b8c\u6210')
+  const isTaskRunning = currentTask && isRunningTaskStatus(taskStatus)
+  const runningMessage = taskStatusMessage(taskStatus, taskMessage)
 
   // 缓存 ReactMarkdown components，仅在 baseURL 变化时重建
   const markdownComponents = useMemo(() => createMarkdownComponents(baseURL), [baseURL])
 
-  // 多版本内容处理
   useEffect(() => {
     if (!currentTask) return
 
-    if (!isMultiVersion) {
-      setCurrentVerId('') // 清空旧版本 ID
-      setModelName(currentFormData?.model_name || '')
-      setStyle(currentFormData?.style || '')
-      setCreateTime(currentCreatedAt || '')
-      setSelectedContent(typeof currentMarkdown === 'string' ? currentMarkdown : '')
+    const latestVersion = [...markdownVersions].sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    )[0]
+    if (latestVersion) {
+      setCurrentVerId(latestVersion.ver_id)
     } else {
-      const latestVersion = [...markdownVersions].sort(
-        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-      )[0]
-
-      if (latestVersion) {
-        setCurrentVerId(latestVersion.ver_id)
-      }
+      setCurrentVerId('')
+      setSelectedContent('')
     }
-  }, [
-    currentTask,
-    currentMarkdown,
-    currentFormData,
-    currentCreatedAt,
-    isMultiVersion,
-    markdownVersions,
-    taskStatus,
-  ])
+  }, [currentTask, markdownVersions, taskStatus])
+
   useEffect(() => {
-    if (!currentTask || !isMultiVersion) return
+    if (!currentTask) return
 
     const currentVer = markdownVersions.find(v => v.ver_id === currentVerId)
     if (currentVer) {
@@ -485,8 +456,12 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       setStyle(currentVer.style)
       setCreateTime(currentVer.created_at || '')
       setSelectedContent(currentVer.content)
+    } else {
+      setModelName(currentFormData?.model_name || '')
+      setStyle(currentFormData?.style || '')
+      setCreateTime(currentCreatedAt || '')
     }
-  }, [currentTask, currentVerId, isMultiVersion, markdownVersions])
+  }, [currentTask, currentVerId, markdownVersions, currentFormData, currentCreatedAt])
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(selectedContent)
@@ -612,7 +587,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
               </p>
             </div>
           </div>
-          <StepBar steps={steps} currentStep={taskStatus} />
+          <StepBar steps={taskSteps} currentStep={taskStatus} />
           <div className="mt-6 flex items-center gap-2 text-sm text-neutral-500">
             <Loading className="h-5 w-5" />
             <span>笔记正文会优先生成，关键截图随后异步补齐。</span>
@@ -643,7 +618,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     )
   }
 
-  if (status === 'failed' && !isMultiVersion) {
+  if (status === 'failed' && markdownVersions.length === 0) {
     return (
       <div className="flex h-full w-full flex-col items-center justify-center gap-4 bg-neutral-50 p-8">
         <Error />
@@ -663,7 +638,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     <div className="flex h-full w-full flex-col overflow-hidden bg-white">
       <MarkdownHeader
         currentTask={currentTask}
-        isMultiVersion={isMultiVersion}
+        isMultiVersion={markdownVersions.length > 1}
         currentVerId={currentVerId}
         setCurrentVerId={setCurrentVerId}
         modelName={modelName}
@@ -711,7 +686,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                           <Loader2 className="h-4 w-4 animate-spin" />
                           <span>{runningMessage}</span>
                         </div>
-                        <StepBar steps={steps} currentStep={taskStatus} compact />
+                        <StepBar steps={taskSteps} currentStep={taskStatus} compact />
                       </div>
                     )}
                     <div className="px-5 pt-5">

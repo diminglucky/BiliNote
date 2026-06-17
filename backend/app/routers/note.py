@@ -19,6 +19,7 @@ from app.services.task_serial_executor import task_serial_executor
 from app.services.visual_enhancement_service import note_to_json_payload
 from app.utils.response import ResponseWrapper as R
 from app.utils.url_parser import extract_video_id
+from app.utils.task_status_writer import write_status_record
 from app.validators.video_url_validator import is_supported_video_url
 from fastapi.responses import StreamingResponse
 import httpx
@@ -166,9 +167,9 @@ def _update_enhancement_status_if_current(
     if not _is_current_enhancement(task_id, enhance_token, generation_token):
         logger.info("Skip stale visual enhancement status (task_id=%s)", task_id)
         return
-    NoteGenerator.write_status(
-        task_id,
-        status,
+    write_status_record(
+        task_id=task_id,
+        status=status,
         message=message,
         generation_token=generation_token,
     )
@@ -182,7 +183,13 @@ def _recover_result_from_cache(task_id: str, generation_token: Optional[str] = N
     audio_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}_audio.json")
     if os.path.exists(result_path):
         if not os.path.exists(markdown_path):
-            return True
+            if not generation_token:
+                return True
+            result_content = _load_json_file_safely(result_path, retries=1)
+            return (
+                isinstance(result_content, dict)
+                and result_content.get("generation_token") == generation_token
+            )
         if os.path.getmtime(result_path) >= os.path.getmtime(markdown_path):
             if not generation_token:
                 return True
@@ -193,6 +200,7 @@ def _recover_result_from_cache(task_id: str, generation_token: Optional[str] = N
             )
     if not all(os.path.exists(path) for path in [markdown_path, transcript_path, audio_path]):
         return False
+
     status_content = None
     active_statuses = {
         TaskStatus.PENDING.value,
@@ -244,7 +252,7 @@ def _recover_result_from_cache(task_id: str, generation_token: Optional[str] = N
                 ensure_ascii=False,
                 indent=2,
             )
-        NoteGenerator.write_status(
+        write_status_record(
             task_id,
             TaskStatus.SUCCESS,
             message="笔记已从缓存恢复",
@@ -256,6 +264,20 @@ def _recover_result_from_cache(task_id: str, generation_token: Optional[str] = N
     except Exception as exc:
         logger.warning("恢复缓存结果失败 (task_id=%s): %s", task_id, exc)
         return False
+
+
+def _clear_previous_generation_outputs(task_id: str) -> None:
+    """Remove stale display artifacts before regenerating while keeping reusable media caches."""
+    stale_paths = [
+        os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json"),
+        os.path.join(NOTE_OUTPUT_DIR, f"{task_id}_markdown.md"),
+    ]
+    for path in stale_paths:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception as exc:
+            logger.warning("重试前清理旧结果失败 (task_id=%s, path=%s): %s", task_id, path, exc)
 
 
 def _submit_visual_enhancement(
@@ -362,7 +384,7 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
         logger.info("Skip stale note completion (task_id=%s)", task_id)
         return
     if wants_screenshot:
-        NoteGenerator.write_status(
+        write_status_record(
             task_id,
             TaskStatus.ENHANCING,
             message="基础笔记已生成，正在根据内容异步补充关键截图",
@@ -377,7 +399,7 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
             getattr(note, "gpt", None),
         )
     else:
-        NoteGenerator.write_status(
+        write_status_record(
             task_id,
             TaskStatus.SUCCESS,
             message="笔记已生成",
@@ -455,20 +477,10 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
 
         generation_token = str(uuid.uuid4())
         if data.task_id:
-            for path in [
-                os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json"),
-                os.path.join(NOTE_OUTPUT_DIR, f"{task_id}_markdown.md"),
-                os.path.join(NOTE_OUTPUT_DIR, f"{task_id}_transcript.json"),
-                os.path.join(NOTE_OUTPUT_DIR, f"{task_id}_audio.json"),
-            ]:
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except Exception as exc:
-                    logger.warning(f"重试前清理旧缓存失败 (task_id={task_id}, path={path}): {exc}")
+            _clear_previous_generation_outputs(task_id)
 
         # 统一先写入 PENDING，表示已进入队列等待执行
-        NoteGenerator.write_status(
+        write_status_record(
             task_id,
             TaskStatus.PENDING,
             generation_token=generation_token,

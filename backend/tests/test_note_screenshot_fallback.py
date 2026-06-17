@@ -303,19 +303,22 @@ class TestNoteScreenshotFallback(unittest.TestCase):
 
         self.assertEqual(state.execution_engine, "langgraph")
 
-    def test_post_process_markdown_propagates_screenshot_errors(self):
-        generator = NoteGenerator.__new__(NoteGenerator)
+    def test_markdown_composer_propagates_screenshot_errors(self):
         audio_meta = type("_AudioMeta", (), {"duration": 120, "video_id": "BV1xx"})()
         screenshot_agent = type(
             "_ScreenshotAgent",
             (),
             {"insert_screenshots": lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("graph failed"))},
         )()
-        generator._visual_screenshot_agent = lambda: screenshot_agent
+        services = note_module.AgentRuntimeServices(
+            update_status=lambda *_args: None,
+            handle_exception=lambda *_args: None,
+            create_screenshot_agent=lambda: screenshot_agent,
+        )
 
         with patch.object(note_module.logger, "exception"):
             with self.assertRaisesRegex(RuntimeError, "graph failed"):
-                generator._post_process_markdown(
+                note_module.MarkdownComposerAgent(services).post_process_markdown(
                     markdown="## Demo *Content-[00:10]\n",
                     video_path=pathlib.Path("video.mp4"),
                     formats=["screenshot"],
@@ -323,12 +326,15 @@ class TestNoteScreenshotFallback(unittest.TestCase):
                     platform="bilibili",
                 )
 
-    def test_post_process_markdown_fails_when_screenshot_requested_without_video(self):
-        generator = NoteGenerator.__new__(NoteGenerator)
+    def test_markdown_composer_fails_when_screenshot_requested_without_video(self):
         audio_meta = type("_AudioMeta", (), {"duration": 120, "video_id": "BV1xx"})()
+        services = note_module.AgentRuntimeServices(
+            update_status=lambda *_args: None,
+            handle_exception=lambda *_args: None,
+        )
 
         with self.assertRaisesRegex(RuntimeError, "没有可用的视频文件"):
-            generator._post_process_markdown(
+            note_module.MarkdownComposerAgent(services).post_process_markdown(
                 markdown="## Demo *Content-[00:10]\n",
                 video_path=None,
                 formats=["screenshot"],
@@ -337,10 +343,12 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             )
 
     def test_summarize_text_updates_main_task_status_not_markdown_cache_status(self):
-        generator = NoteGenerator.__new__(NoteGenerator)
         status_updates = []
-        generator._update_status = lambda task_id, status, message=None: status_updates.append(
-            (task_id, getattr(status, "value", status), message)
+        services = note_module.AgentRuntimeServices(
+            update_status=lambda task_id, status, message=None: status_updates.append(
+                (task_id, getattr(status, "value", status), message)
+            ),
+            handle_exception=lambda *_args: None,
         )
         task_status = type(
             "_TaskStatus",
@@ -362,9 +370,12 @@ class TestNoteScreenshotFallback(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             markdown_path = pathlib.Path(tmp_dir) / "task-1_markdown.md"
-            with patch.object(note_module, "TaskStatus", task_status), \
-                    patch.object(note_module, "GPTSource", gpt_source):
-                markdown = generator._summarize_text(
+            with patch.dict(
+                note_module.NoteWriterAgent.summarize_text.__globals__,
+                {"TaskStatus": task_status, "GPTSource": gpt_source},
+            ):
+                markdown = note_module.NoteWriterAgent(services).summarize_text(
+                    task_id="task-1",
                     audio_meta=audio_meta,
                     transcript=transcript,
                     gpt=_GPT(),

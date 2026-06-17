@@ -26,10 +26,11 @@ import {
   Wand2,
 } from 'lucide-react'
 import { Alert, AlertDescription } from '@/components/ui/alert.tsx'
-import { generateNote } from '@/services/note.ts'
+import { taskApi } from '@/services/taskApi'
 import { uploadFile } from '@/services/upload.ts'
 import { useTaskStore } from '@/store/taskStore'
 import { useModelStore } from '@/store/modelStore'
+import { isRunningTaskStatus } from '@/models/taskStateMachine'
 import {
   Tooltip,
   TooltipContent,
@@ -297,7 +298,7 @@ const NoteForm = () => {
   ])
 
   /* ---- 帮助函数 ---- */
-  const isGenerating = () => !['SUCCESS', 'FAILED', undefined].includes(getCurrentTask()?.status)
+  const isGenerating = () => isRunningTaskStatus(getCurrentTask()?.status)
   const generating = isSubmitting || isGenerating()
   const handleFileUpload = async (file: File, cb: (url: string) => void) => {
     const formData = new FormData()
@@ -345,7 +346,7 @@ const NoteForm = () => {
 
     // message.success('已提交任务')
     try {
-      const data = await generateNote(payload)
+      const data = await taskApi.generate(payload)
       addPendingTask(data.task_id, values.platform, payload, data.generation_token)
       toast.success('笔记生成任务已提交！')
     } catch (e: any) {

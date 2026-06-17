@@ -101,7 +101,7 @@ class TestNoteRouterCacheRecovery(unittest.TestCase):
             self.assertEqual(status["status"], TaskStatus.SUCCESS.value)
             self.assertEqual(status["generation_token"], "generation-1")
 
-    def test_retry_generation_should_not_reuse_stale_cache_result(self):
+    def test_retry_generation_clears_stale_result_but_keeps_media_caches(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_dir = pathlib.Path(tmp_dir)
             task_id = "task-1"
@@ -144,8 +144,8 @@ class TestNoteRouterCacheRecovery(unittest.TestCase):
             self.assertNotEqual(status["generation_token"], "old-token")
             self.assertFalse(result_path.exists() and json.loads(result_path.read_text(encoding="utf-8")).get("generation_token") == "old-token")
             self.assertFalse(markdown_path.exists())
-            self.assertFalse(transcript_path.exists())
-            self.assertFalse(audio_path.exists())
+            self.assertTrue(transcript_path.exists())
+            self.assertTrue(audio_path.exists())
 
     def test_status_with_new_generation_token_does_not_return_old_result(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -184,6 +184,38 @@ class TestNoteRouterCacheRecovery(unittest.TestCase):
             self.assertEqual(data["status"], TaskStatus.PENDING.value)
             self.assertEqual(data["generation_token"], "new-token")
             self.assertNotIn("result", data)
+
+    def test_recover_existing_result_without_markdown_must_match_generation_token(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = pathlib.Path(tmp_dir)
+            task_id = "task-1"
+            result_path = output_dir / f"{task_id}.json"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "markdown": "old note",
+                        "transcript": {},
+                        "audio_meta": {},
+                        "generation_token": "old-token",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(note_router, "NOTE_OUTPUT_DIR", str(output_dir)):
+                self.assertFalse(
+                    note_router._recover_result_from_cache(
+                        task_id,
+                        generation_token="new-token",
+                    )
+                )
+                self.assertTrue(
+                    note_router._recover_result_from_cache(
+                        task_id,
+                        generation_token="old-token",
+                    )
+                )
 
     def test_success_status_with_new_generation_token_does_not_return_old_result(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

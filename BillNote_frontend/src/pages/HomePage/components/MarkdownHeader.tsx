@@ -17,7 +17,7 @@ interface VersionNote {
 
 interface NoteHeaderProps {
   currentTask?: {
-    markdown: VersionNote[] | string
+    markdown: VersionNote[]
   }
   isMultiVersion: boolean
   currentVerId: string

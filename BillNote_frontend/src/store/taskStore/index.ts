@@ -1,22 +1,11 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
-import { delete_task, generateNote } from '@/services/note.ts'
+import { taskApi } from '@/services/taskApi'
 import { v4 as uuidv4 } from 'uuid'
 import toast from 'react-hot-toast'
 import { get, set, del } from 'idb-keyval'
+import type { TaskStatus } from '@/models/taskStateMachine'
 
-
-export type TaskStatus =
-  | 'PENDING'
-  | 'PARSING'
-  | 'DOWNLOADING'
-  | 'TRANSCRIBING'
-  | 'SUMMARIZING'
-  | 'FORMATTING'
-  | 'ENHANCING'
-  | 'SAVING'
-  | 'SUCCESS'
-  | 'FAILED'
 
 export interface AudioMeta {
   cover_url: string
@@ -46,13 +35,15 @@ export interface Markdown {
   style: string
   model_name: string
   created_at: string
+  generationToken?: string
 }
 
 export interface Task {
   id: string
   generationToken?: string
   isRetrySubmitting?: boolean
-  markdown: string|Markdown [] //为了兼容之前的笔记
+  platform: string
+  markdown: Markdown[]
   transcript: Transcript
   status: TaskStatus
   message?: string
@@ -66,19 +57,89 @@ export interface Task {
     quality: string
     model_name: string
     provider_id: string
+    format?: string[]
+    style?: string
+    extras?: string
+    video_understanding?: boolean
+    video_interval?: number
+    grid_size?: number[]
   }
+}
+
+type TaskUpdate = Partial<Omit<Task, 'id' | 'createdAt' | 'markdown'>> & {
+  markdown?: Markdown[] | string
 }
 
 interface TaskStore {
   tasks: Task[]
   currentTaskId: string | null
   addPendingTask: (taskId: string, platform: string, formData?: any, generationToken?: string) => void
-  updateTaskContent: (id: string, data: Partial<Omit<Task, 'id' | 'createdAt'>>) => void
+  updateTaskContent: (id: string, data: TaskUpdate) => void
   removeTask: (id: string) => void
   clearTasks: () => void
   setCurrentTask: (taskId: string | null) => void
   getCurrentTask: () => Task | null
   retryTask: (id: string, payload?: any) => Promise<void>
+}
+
+export const latestMarkdownContent = (markdown: Markdown[] | string | undefined): string => {
+  if (Array.isArray(markdown)) return markdown[0]?.content || ''
+  return typeof markdown === 'string' ? markdown : ''
+}
+
+const markdownVersionFromString = (
+  task: Pick<Task, 'id' | 'formData'>,
+  content: string,
+  generationToken?: string,
+): Markdown => ({
+  ver_id: `${task.id}-${uuidv4()}`,
+  content,
+  style: task.formData?.style || '',
+  model_name: task.formData?.model_name || '',
+  created_at: new Date().toISOString(),
+  generationToken,
+})
+
+const normalizeMarkdownVersions = (
+  task: Pick<Task, 'id' | 'formData'>,
+  markdown: Markdown[] | string | undefined,
+): Markdown[] => {
+  if (Array.isArray(markdown)) return markdown
+  if (typeof markdown === 'string' && markdown.trim()) {
+    return [markdownVersionFromString(task, markdown)]
+  }
+  return []
+}
+
+const upsertMarkdownVersion = (
+  task: Pick<Task, 'id' | 'formData' | 'generationToken'>,
+  versions: Markdown[],
+  content: string,
+  generationToken?: string,
+): Markdown[] => {
+  const token = generationToken || task.generationToken
+
+  if (token) {
+    const existingIndex = versions.findIndex(version => version.generationToken === token)
+    if (existingIndex >= 0) {
+      return versions.map((version, index) =>
+        index === existingIndex
+          ? {
+              ...version,
+              content,
+              style: task.formData?.style || version.style,
+              model_name: task.formData?.model_name || version.model_name,
+            }
+          : version,
+      )
+    }
+    return [markdownVersionFromString(task, content, token), ...versions]
+  }
+
+  const latestContent = latestMarkdownContent(versions)
+  if (content === latestContent) return versions
+
+  return [markdownVersionFromString(task, content, token), ...versions]
 }
 
 export const useTaskStore = create<TaskStore>()(
@@ -96,7 +157,7 @@ export const useTaskStore = create<TaskStore>()(
               id: taskId,
               generationToken,
               status: 'PENDING',
-              markdown: '',
+              markdown: [],
               platform: platform,
               transcript: {
                 full_text: '',
@@ -125,52 +186,30 @@ export const useTaskStore = create<TaskStore>()(
             tasks: state.tasks.map(task => {
               if (task.id !== id) return task
 
-              // 如果是 markdown 字符串，封装为版本
               if (typeof data.markdown === 'string') {
-                const prev = task.markdown
-                const latestContent = Array.isArray(prev)
-                  ? prev[0]?.content || ''
-                  : typeof prev === 'string'
-                    ? prev
-                    : ''
-                if (data.markdown === latestContent) {
+                const prev = normalizeMarkdownVersions(task, task.markdown)
+                const nextMarkdown = upsertMarkdownVersion(
+                  task,
+                  prev,
+                  data.markdown,
+                  data.generationToken || task.generationToken,
+                )
+                if (nextMarkdown === prev) {
                   const { markdown: _markdown, ...rest } = data
                   return { ...task, ...rest }
                 }
-                const newVersion: Markdown = {
-                  ver_id: `${task.id}-${uuidv4()}`,
-                  content: data.markdown,
-                  style: task.formData.style || '',
-                  model_name: task.formData.model_name || '',
-                  created_at: new Date().toISOString(),
-                }
-
-                let updatedMarkdown: Markdown[]
-                if (Array.isArray(prev)) {
-                  updatedMarkdown = [newVersion, ...prev]
-                } else {
-                  updatedMarkdown = [
-                    newVersion,
-                    ...(typeof prev === 'string' && prev
-                        ? [{
-                          ver_id: `${task.id}-${uuidv4()}`,
-                          content: prev,
-                          style: task.formData.style || '',
-                          model_name: task.formData.model_name || '',
-                          created_at: new Date().toISOString(),
-                        }]
-                        : []),
-                  ]
-                }
-
                 return {
                   ...task,
                   ...data,
-                  markdown: updatedMarkdown,
+                  markdown: nextMarkdown,
                 }
               }
 
-              return { ...task, ...data }
+              if (Array.isArray(data.markdown)) {
+                return { ...task, ...data, markdown: data.markdown }
+              }
+
+              return { ...task, ...data, markdown: normalizeMarkdownVersions(task, task.markdown) }
             }),
           })),
 
@@ -186,7 +225,6 @@ export const useTaskStore = create<TaskStore>()(
           return
         }
         const task = get().tasks.find(task => task.id === id)
-        console.log('retry',task)
         if (!task) return
 
         const newFormData = payload || task.formData
@@ -208,7 +246,7 @@ export const useTaskStore = create<TaskStore>()(
           ),
         }))
         try {
-          const response = await generateNote({
+          const response = await taskApi.generate({
             ...newFormData,
             task_id: id,
           })
@@ -222,6 +260,9 @@ export const useTaskStore = create<TaskStore>()(
                 t.id === id
                     ? {
                       ...t,
+                      formData: newFormData,
+                      status: 'PENDING',
+                      message: '重新生成任务已提交，等待后端开始处理...',
                       generationToken,
                       isRetrySubmitting: false,
                     }
@@ -255,21 +296,6 @@ export const useTaskStore = create<TaskStore>()(
           console.error('重试任务失败：', e)
           return
         }
-
-        set(state => ({
-          tasks: state.tasks.map(t =>
-              t.id === id
-                  ? {
-                    ...t,
-                    formData: newFormData, // ✅ 显式更新 formData
-                    status: 'PENDING',
-                    message: '任务已提交，等待后端开始处理...',
-                    generationToken: t.generationToken,
-                    isRetrySubmitting: false,
-                  }
-                  : t
-          ),
-        }))
       },
 
 
@@ -284,7 +310,7 @@ export const useTaskStore = create<TaskStore>()(
 
         // 调用后端删除接口（如果找到了任务）
         if (task) {
-          await delete_task({
+          await taskApi.delete({
             video_id: task.audioMeta.video_id,
             platform: task.platform,
           })
@@ -297,6 +323,7 @@ export const useTaskStore = create<TaskStore>()(
     }),
     {
       name: 'task-storage',
+      version: 1,
       storage: createJSONStorage(() => ({
         getItem: async (name: string): Promise<string | null> => {
           const value = await get(name)
@@ -305,10 +332,23 @@ export const useTaskStore = create<TaskStore>()(
         setItem: async (name: string, value: string): Promise<void> => {
           await set(name, value)
         },
-        removeItem: async (name: string): Promise<void> => {
+      removeItem: async (name: string): Promise<void> => {
           await del(name)
         },
       })),
+      migrate: (persisted: any) => {
+        if (!persisted?.state?.tasks) return persisted
+        return {
+          ...persisted,
+          state: {
+            ...persisted.state,
+            tasks: persisted.state.tasks.map((task: Task & { markdown?: Markdown[] | string }) => ({
+              ...task,
+              markdown: normalizeMarkdownVersions(task, task.markdown),
+            })),
+          },
+        }
+      },
     }
   )
 )

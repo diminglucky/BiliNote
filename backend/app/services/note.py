@@ -1,10 +1,8 @@
 import json
 import logging
 import os
-import tempfile
-from dataclasses import asdict
 from pathlib import Path
-from typing import Callable, List, Optional, Union
+from typing import List, Optional, Union
 
 from pydantic import HttpUrl
 from dotenv import load_dotenv
@@ -18,21 +16,18 @@ from app.exceptions.note import NoteError
 from app.exceptions.provider import ProviderError
 from app.gpt.base import GPT
 from app.gpt.gpt_factory import GPTFactory
-from app.agents import AgentExecutionContext, StepExecutionMode, build_note_execution_plan
+from app.agents import AgentExecutionContext, build_note_execution_plan
+from app.agents.executor import AgentRuntimeContext, PlanExecutor
 from app.agents.note_agents import (
+    AgentRuntimeServices,
+    ChatRagAgent,
     MarkdownComposerAgent,
-    MarkdownComposeRequest,
     DownloadAgent,
-    DownloadRequest,
     NoteWriterAgent,
-    NoteWriteRequest,
     TranscriptAgent,
-    TranscriptResolveRequest,
 )
-from app.models.gpt_model import GPTSource
 from app.models.model_config import ModelConfig
-from app.models.notes_model import AudioDownloadResult, NoteResult
-from app.models.transcriber_model import TranscriptResult, TranscriptSegment
+from app.models.notes_model import NoteResult
 from app.services.constant import SUPPORT_PLATFORM_MAP
 from app.services.provider import ProviderService
 from app.services.visual_screenshot_agent import (
@@ -40,9 +35,9 @@ from app.services.visual_screenshot_agent import (
 )
 from app.transcriber.base import Transcriber
 from app.transcriber.transcriber_provider import get_transcriber, _transcribers
-from app.utils.note_helper import replace_content_markers, prepend_source_link
+from app.utils.note_helper import prepend_source_link
+from app.utils.task_status_writer import write_status_record
 from app.utils.video_helper import generate_screenshot
-from app.utils.video_quality import is_screenshot_ready_video
 from app.utils.video_reader import VideoReader
 
 # ------------------ 环境变量与全局配置 ------------------
@@ -80,10 +75,17 @@ class NoteGenerator:
         self.video_path: Optional[Path] = None
         self.video_img_urls=[]
         self.execution_plan = None
-        self.download_agent = DownloadAgent(self)
-        self.transcript_agent = TranscriptAgent(self)
-        self.note_writer_agent = NoteWriterAgent(self)
-        self.markdown_composer_agent = MarkdownComposerAgent(self)
+        self.agent_services = AgentRuntimeServices(
+            update_status=self._update_status,
+            handle_exception=self._handle_exception,
+            get_downloader=self._get_downloader,
+            transcribe_audio=lambda audio_file: self.transcriber.transcript(file_path=audio_file),
+            create_screenshot_agent=self._visual_screenshot_agent,
+        )
+        self.download_agent = DownloadAgent(self.agent_services)
+        self.transcript_agent = TranscriptAgent(self.agent_services)
+        self.note_writer_agent = NoteWriterAgent(self.agent_services)
+        self.markdown_composer_agent = MarkdownComposerAgent(self.agent_services)
         logger.info("NoteGenerator 初始化完成")
 
     # ---------------- 公有方法 ----------------
@@ -158,120 +160,57 @@ class NoteGenerator:
                 },
             )
         )
-        logger.info(
-            "Agent execution plan for task_id=%s: %s",
-            task_id,
-            " -> ".join(self.execution_plan.step_ids()),
-        )
-        compose_step = self.execution_plan.get_step("compose_markdown")
-
         try:
             logger.info(f"开始生成笔记 (task_id={task_id})")
             self._update_status(task_id, TaskStatus.PARSING)
-
-            # 获取下载器与 GPT 实例
-
             downloader = self._get_downloader(platform)
             gpt = self._get_gpt(model_name, provider_id)
+            logger.info(
+                "Agent execution plan for task_id=%s: %s",
+                task_id,
+                " -> ".join(self.execution_plan.step_ids()),
+            )
 
-            # 缓存文件路径
-            audio_cache_file = NOTE_OUTPUT_DIR / f"{task_id}_audio.json"
-            transcript_cache_file = NOTE_OUTPUT_DIR / f"{task_id}_transcript.json"
-            markdown_cache_file = NOTE_OUTPUT_DIR / f"{task_id}_markdown.md"
-            # 1. 获取字幕/转写：优先缓存 → 平台字幕 → 音频转写
-            transcript = self.transcript_agent.load_cached_or_platform_subtitles(
+            runtime_context = AgentRuntimeContext(
+                task_id=task_id,
                 video_url=str(video_url),
-                downloader=downloader,
-                transcript_cache_file=transcript_cache_file,
-            )
-
-            # 2. 下载音频/视频
-            # 有字幕时只提取元信息，不下载音视频文件（除非需要截图/视频理解）
-            has_transcript = transcript is not None
-            need_full_download = self.download_agent.needs_full_download(
-                has_transcript=has_transcript,
+                platform=platform,
+                quality=quality,
+                formats=formats,
                 wants_screenshot=wants_screenshot,
+                wants_link=wants_link,
+                note_output_dir=NOTE_OUTPUT_DIR,
+                downloader=downloader,
+                gpt=gpt,
+                output_path=output_path,
+                style=style,
+                extras=extras,
                 video_understanding=video_understanding,
-            )
-            audio_meta = self.download_agent.run(
-                DownloadRequest(
-                    video_url=str(video_url),
-                    platform=platform,
-                    quality=quality,
-                    audio_cache_file=audio_cache_file,
-                    downloader=downloader,
-                    output_path=output_path,
-                    screenshot=wants_screenshot,
-                    video_understanding=video_understanding,
-                    video_interval=video_interval,
-                    grid_size=grid_size,
-                    skip_download=not need_full_download,
-                )
+                video_interval=video_interval,
+                grid_size=grid_size,
+                defer_screenshots=defer_screenshots,
             )
 
-            # 3. 如果前面没拿到字幕，走转写流程
-            if transcript is None:
-                transcript = self.transcript_agent.resolve(
-                    TranscriptResolveRequest(
-                        video_url=str(video_url),
-                        audio_file=audio_meta.file_path,
-                        transcript_cache_file=transcript_cache_file,
-                        downloader=downloader,
-                        task_id=task_id,
-                    )
-                )
-
-            # 3. GPT 总结
-            gpt_supports_vision = getattr(gpt, "supports_vision", False)
-            if video_understanding and self.video_img_urls and not gpt_supports_vision:
-                logger.warning("当前模型不支持视觉输入，视频理解截图将不会发送给模型")
-
-            markdown = self.note_writer_agent.run(
-                NoteWriteRequest(
-                    audio_meta=audio_meta,
-                    transcript=transcript,
-                    gpt=gpt,
-                    markdown_cache_file=markdown_cache_file,
-                    link=wants_link,
-                    screenshot=wants_screenshot,
-                    formats=formats,
-                    style=style,
-                    extras=extras,
-                    video_img_urls=self.video_img_urls,
-                )
+            executor = PlanExecutor(
+                download_agent=self.download_agent,
+                transcript_agent=self.transcript_agent,
+                note_writer_agent=self.note_writer_agent,
+                markdown_composer_agent=self.markdown_composer_agent,
+                chat_rag_agent=ChatRagAgent(),
             )
+            runtime_context = executor.run(self.execution_plan, runtime_context)
+            markdown = prepend_source_link(runtime_context.markdown or "", str(video_url))
+            audio_meta = runtime_context.audio_meta
+            transcript = runtime_context.transcript
+            self.video_path = runtime_context.video_path
+            self.video_img_urls = runtime_context.video_img_urls
 
-            # 4. 截图 & 链接替换
-            post_process_formats = []
-            if compose_step:
-                if compose_step.config.get("include_links"):
-                    post_process_formats.append("link")
-                if wants_screenshot and compose_step.mode != StepExecutionMode.BACKGROUND:
-                    post_process_formats.append("screenshot")
-
-            if post_process_formats:
-                self._update_status(task_id, TaskStatus.FORMATTING, message="正在筛选关键截图和整理笔记")
-                markdown = self.markdown_composer_agent.run(
-                    MarkdownComposeRequest(
-                        markdown=markdown,
-                        video_path=self.video_path,
-                        formats=post_process_formats,
-                        audio_meta=audio_meta,
-                        platform=platform,
-                        gpt=gpt,
-                        transcript_segments=transcript.segments if transcript else [],
-                    )
-                )
-
-            markdown = prepend_source_link(markdown, str(video_url))
             if self.video_path and not getattr(audio_meta, "video_path", None):
                 audio_meta.video_path = str(self.video_path)
 
-            # 5. 保存记录到数据库
             self._update_status(task_id, TaskStatus.SAVING)
             self._save_metadata(video_id=audio_meta.video_id, platform=platform, task_id=task_id)
 
-            # 6. 完成
             if not defer_screenshots:
                 self._update_status(task_id, TaskStatus.SUCCESS)
             logger.info(f"笔记生成成功 (task_id={task_id})")
@@ -294,7 +233,7 @@ class NoteGenerator:
         logger.info(f"删除笔记记录 (video_id={video_id}, platform={platform})")
         return delete_task_by_video(video_id, platform)
 
-    # ---------------- 私有方法 ----------------
+    # ---------------- 基础设施方法 ----------------
 
     def _init_transcriber(self) -> Transcriber:
         """
@@ -349,81 +288,13 @@ class NoteGenerator:
         logger.info(f"使用下载器：{downloader.__class__.__name__}")
         return downloader
 
-    @staticmethod
-    def write_status(
-        task_id: Optional[str],
-        status: Union[str, TaskStatus],
-        message: Optional[str] = None,
-        generation_token: Optional[str] = None,
-        output_dir: Optional[Path] = None,
-        force: bool = False,
-    ):
-        """
-        创建或更新 {task_id}.status.json，记录当前任务状态
-
-        :param task_id: 任务唯一 ID
-        :param status: TaskStatus 枚举或自定义状态字符串
-        :param message: 可选消息，用于记录失败原因等
-        """
-        if not task_id:
-            return
-
-        note_output_dir = output_dir or NOTE_OUTPUT_DIR
-        note_output_dir.mkdir(parents=True, exist_ok=True)
-        status_file = note_output_dir / f"{task_id}.status.json"
-        if generation_token and status_file.exists() and not force:
-            try:
-                existing = json.loads(status_file.read_text(encoding="utf-8"))
-                existing_token = existing.get("generation_token")
-                if existing_token and existing_token != generation_token:
-                    logger.info("Skip stale status update (task_id=%s)", task_id)
-                    return
-            except Exception as exc:
-                logger.debug("Ignore unreadable status file while updating task status: %s", exc)
-        print(f"写入状态文件: {status_file} 当前状态: {status}")
-        data = {"status": status.value if isinstance(status, TaskStatus) else status}
-        if generation_token:
-            data["generation_token"] = generation_token
-        if message:
-            data["message"] = message
-
-        try:
-            # First create a temporary file
-            temp_handle = tempfile.NamedTemporaryFile(
-                mode='w',
-                encoding='utf-8',
-                delete=False,
-                dir=str(note_output_dir),
-                prefix=f"{status_file.name}.",
-                suffix='.tmp',
-            )
-            temp_file = Path(temp_handle.name)
-
-            # Write to temporary file
-            with temp_handle as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-
-            # Atomic rename operation
-            temp_file.replace(status_file)
-
-            print(f"状态文件写入成功: {status_file}")
-        except Exception as e:
-            logger.error(f"写入状态文件失败 (task_id={task_id})：{e}")
-            # Try to write error to file directly as fallback
-            try:
-                with status_file.open('w', encoding='utf-8') as f:
-                    f.write(f"Error writing status: {str(e)}")
-            except Exception as fallback_exc:
-                logger.error("Failed to write status fallback: %s", fallback_exc)
-
     def _update_status(self, task_id, status, message: Optional[str] = None):
-        self.write_status(
+        write_status_record(
             task_id=task_id,
             status=status,
             message=message,
             generation_token=self.generation_token,
+            output_dir=NOTE_OUTPUT_DIR,
         )
 
     def _handle_exception(self, task_id, exc):
@@ -435,288 +306,6 @@ class NoteGenerator:
             except Exception:
                 error_message = str(error_message)
         self._update_status(task_id, TaskStatus.FAILED, message=error_message)
-
-    def _download_media(
-        self,
-        downloader: Downloader,
-        video_url: Union[str, HttpUrl],
-        quality: DownloadQuality,
-        audio_cache_file: Path,
-        status_phase: TaskStatus,
-        platform: str,
-        output_path: Optional[str],
-        screenshot: bool,
-        video_understanding: bool,
-        video_interval: int,
-        grid_size: List[int],
-        skip_download: bool = False,
-    ) -> AudioDownloadResult | None:
-        """
-        1. 检查音频缓存；若不存在，则根据需要下载音频或视频（若需截图/可视化）。
-        2. 如果需要视频，则先下载视频并生成缩略图集，再下载音频。
-        3. 返回 AudioDownloadResult
-
-        :param downloader: Downloader 实例
-        :param video_url: 视频/音频链接
-        :param quality: 音频下载质量
-        :param audio_cache_file: 本地缓存 JSON 文件路径
-        :param status_phase: 对应的状态枚举，如 TaskStatus.DOWNLOADING
-        :param platform: 平台标识
-        :param output_path: 下载输出目录（可为 None）
-        :param screenshot: 是否需要在笔记中插入截图
-        :param video_understanding: 是否需要生成缩略图
-        :param video_interval: 视频截帧间隔
-        :param grid_size: 缩略图网格尺寸
-        :return: AudioDownloadResult 对象
-        """
-        task_id = audio_cache_file.stem.split("_")[0]
-        self._update_status(task_id, status_phase)
-        need_video = screenshot or video_understanding
-
-        # 已有缓存，尝试加载
-        if audio_cache_file.exists():
-            logger.info(f"检测到音频缓存 ({audio_cache_file})，直接读取")
-            try:
-                data = json.loads(audio_cache_file.read_text(encoding="utf-8"))
-                cached_audio = AudioDownloadResult(**data)
-                cached_video_path = (cached_audio.video_path or "").strip() if cached_audio.video_path else ""
-
-                # 需要视频（截图 / 视频理解）时，缓存里必须有可用 video_path；否则不能直接命中缓存。
-                if need_video:
-                    if cached_video_path and Path(cached_video_path).exists():
-                        cached_video = Path(cached_video_path)
-                        if is_screenshot_ready_video(cached_video):
-                            self.video_path = cached_video
-                            return cached_audio
-                        logger.info("缓存视频不满足截图清晰度要求，继续重新下载视频")
-                    logger.info("缓存缺少可用 video_path，继续下载视频以支持截图/视频理解")
-                else:
-                    return cached_audio
-            except Exception as e:
-                logger.warning(f"读取音频缓存失败，将重新下载：{e}")
-
-        # 有字幕且不需要截图/视频理解时，只提取元信息不下载文件
-        if skip_download:
-            logger.info("已有字幕，仅提取视频元信息（不下载音视频）")
-            try:
-                audio = downloader.download(
-                    video_url=video_url,
-                    quality=quality,
-                    output_dir=output_path,
-                    need_video=False,
-                    skip_download=True,
-                )
-                audio_cache_file.write_text(
-                    json.dumps(asdict(audio), ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                logger.info(f"元信息提取完成 ({audio_cache_file})")
-                return audio
-            except Exception as exc:
-                logger.warning(f"元信息提取失败，将尝试完整下载: {exc}")
-
-        if need_video and not grid_size:
-            grid_size = [2, 2]
-        if grid_size:
-            grid_size = [
-                max(1, min(int(grid_size[0]), 4)),
-                max(1, min(int(grid_size[1]), 4)),
-            ]
-
-        frame_interval = video_interval if video_interval and video_interval > 0 else 6
-        if need_video:
-            try:
-                logger.info("开始下载视频")
-                video_path_str = downloader.download_video(video_url)
-                self.video_path = Path(video_path_str)
-                logger.info(f"视频下载完成：{self.video_path}")
-
-                if grid_size and os.getenv("BILINOTE_LEGACY_VIDEO_GRID", "").lower() in {"1", "true", "yes"}:
-                    self.video_img_urls = VideoReader(
-                        video_path=str(self.video_path),
-                        grid_size=tuple(grid_size),
-                        frame_interval=frame_interval,
-                        unit_width=960,
-                        unit_height=540,
-                        save_quality=80,
-                    ).run()
-                else:
-                    logger.info("未指定 grid_size，跳过缩略图生成")
-            except Exception as exc:
-                logger.error(f"视频下载失败：{exc}")
-                self._handle_exception(task_id, exc)
-                raise
-
-        # 下载音频
-        try:
-            logger.info("开始下载音频")
-            audio = downloader.download(
-                video_url=video_url,
-                quality=quality,
-                output_dir=output_path,
-                need_video=need_video,
-            )
-            audio_cache_file.write_text(json.dumps(asdict(audio), ensure_ascii=False, indent=2), encoding="utf-8")
-            logger.info(f"音频下载并缓存成功 ({audio_cache_file})")
-            return audio
-        except Exception as exc:
-            logger.error(f"音频下载失败：{exc}")
-            self._handle_exception(task_id, exc)
-            raise
-
-
-    def _transcribe_audio(
-        self,
-        audio_file: str,
-        transcript_cache_file: Path,
-        status_phase: TaskStatus,
-    ) -> TranscriptResult | None:
-        """
-        1. 检查转写缓存；若存在则尝试加载，否则调用转写器生成并缓存。
-        2. 返回 TranscriptResult 对象
-
-        :param audio_file: 音频文件本地路径
-        :param transcript_cache_file: 转写结果缓存路径
-        :param status_phase: 对应的状态枚举，如 TaskStatus.TRANSCRIBING
-        :return: TranscriptResult 对象
-        """
-        task_id = transcript_cache_file.stem.split("_")[0]
-        self._update_status(task_id, status_phase)
-
-        # 已有缓存，尝试加载
-        if transcript_cache_file.exists():
-            logger.info(f"检测到转写缓存 ({transcript_cache_file})，尝试读取")
-            try:
-                data = json.loads(transcript_cache_file.read_text(encoding="utf-8"))
-                segments = [TranscriptSegment(**seg) for seg in data.get("segments", [])]
-                return TranscriptResult(language=data["language"], full_text=data["full_text"], segments=segments)
-            except Exception as e:
-                logger.warning(f"加载转写缓存失败，将重新转写：{e}")
-
-        # 调用转写器
-        try:
-            logger.info("开始转写音频")
-            transcript = self.transcriber.transcript(file_path=audio_file)
-            transcript_cache_file.write_text(json.dumps(asdict(transcript), ensure_ascii=False, indent=2), encoding="utf-8")
-            logger.info(f"转写并缓存成功 ({transcript_cache_file})")
-            return transcript
-        except Exception as exc:
-            logger.error(f"音频转写失败：{exc}")
-            self._handle_exception(task_id, exc)
-            raise
-
-    def _summarize_text(
-        self,
-        audio_meta: AudioDownloadResult,
-        transcript: TranscriptResult,
-        gpt: GPT,
-        markdown_cache_file: Path,
-        link: bool,
-        screenshot: bool,
-        formats: List[str],
-        style: Optional[str],
-        extras: Optional[str],
-            video_img_urls: List[str],
-    ) -> str | None:
-        """
-        调用 GPT 对转写结果进行总结，生成 Markdown 文本并缓存。
-
-        :param audio_meta: AudioDownloadResult 元信息
-        :param transcript: TranscriptResult 转写结果
-        :param gpt: GPT 实例
-        :param markdown_cache_file: Markdown 缓存路径
-        :param link: 是否在笔记中插入链接
-        :param screenshot: 是否在笔记中生成截图占位
-        :param formats: 包含 'link' 或 'screenshot' 的列表
-        :param style: GPT 输出风格
-        :param extras: GPT 额外参数
-        :return: 生成的 Markdown 字符串
-        """
-        task_id = markdown_cache_file.stem.removesuffix("_markdown")
-        self._update_status(task_id, TaskStatus.SUMMARIZING)
-
-        source = GPTSource(
-            title=audio_meta.title,
-            segment=transcript.segments,
-            tags=audio_meta.raw_info.get("tags", []),
-            screenshot=screenshot,
-            video_img_urls=video_img_urls,
-            link=link,
-            _format=formats,
-            style=style,
-            extras=extras,
-            checkpoint_key=task_id,
-        )
-
-        try:
-            markdown = gpt.summarize(source)
-            markdown_cache_file.write_text(markdown, encoding="utf-8")
-            logger.info(f"GPT 总结并缓存成功 ({markdown_cache_file})")
-            return markdown
-        except Exception as exc:
-            logger.error(f"GPT 总结失败：{exc}")
-            self._handle_exception(task_id, exc)
-            raise
-
-    def _post_process_markdown(
-        self,
-        markdown: str,
-        video_path: Optional[Path],
-        formats: List[str],
-        audio_meta: AudioDownloadResult,
-        platform: str,
-        gpt: Optional[GPT] = None,
-        on_markdown_update: Optional[Callable[[str, int, str], None]] = None,
-        transcript_segments: Optional[list] = None,
-    ) -> str:
-        """
-        对生成的 Markdown 做后期处理：插入截图和/或插入链接。
-
-        :param markdown: 原始 Markdown 字符串
-        :param video_path: 本地视频路径（可为 None）
-        :param formats: 包含 'link' 或 'screenshot' 的列表
-        :param audio_meta: AudioDownloadResult 元信息，用于链接替换
-        :param platform: 平台标识，用于链接替换
-        :return: 处理后的 Markdown 字符串
-        """
-        if "screenshot" in formats and not video_path:
-            raise RuntimeError("截图已启用，但没有可用的视频文件")
-
-        if "screenshot" in formats and video_path:
-            try:
-                screenshot_agent = self._visual_screenshot_agent()
-                try:
-                    updated = screenshot_agent.insert_screenshots(
-                        markdown,
-                        video_path,
-                        audio_meta.duration,
-                        gpt,
-                        on_markdown_update=on_markdown_update,
-                        transcript_segments=transcript_segments,
-                    )
-                except TypeError as exc:
-                    if "transcript_segments" not in str(exc):
-                        raise
-                    updated = screenshot_agent.insert_screenshots(
-                        markdown,
-                        video_path,
-                        audio_meta.duration,
-                        gpt,
-                        on_markdown_update=on_markdown_update,
-                    )
-                if updated is not None:
-                    markdown = updated
-            except Exception as exc:
-                logger.exception("截图插入失败")
-                raise
-
-        if "link" in formats:
-            try:
-                markdown = replace_content_markers(markdown, video_id=audio_meta.video_id, platform=platform)
-            except Exception as e:
-                logger.warning(f"链接插入失败，跳过该步骤：{e}")
-
-        return markdown
 
     def _visual_screenshot_agent(self) -> VisualScreenshotAgent:
         return VisualScreenshotAgent(

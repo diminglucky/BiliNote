@@ -143,6 +143,21 @@ class VisualEnhancementService:
                 logger.info("Skip stale visual enhancement writeback (task_id=%s)", task_id)
                 return False
 
+            latest_markdown = latest_payload.get("markdown") or ""
+            if inserted_count > 0 and latest_markdown != markdown and (not enhanced or enhanced == markdown):
+                self._reindex_task(task_id)
+                self._update_status_if_current(
+                    result_path,
+                    enhance_token,
+                    generation_token,
+                    self.note_output_dir,
+                    self.status_writer,
+                    task_id,
+                    "SUCCESS",
+                    message="Note is ready; key screenshots have been enhanced",
+                )
+                return True
+
             if not enhanced or enhanced == markdown:
                 inserted_after = (enhanced or markdown).count("![](") - markdown.count("![](")
                 status_message = (
@@ -178,7 +193,11 @@ class VisualEnhancementService:
             return True
         except Exception as exc:
             logger.exception("Visual enhancement failed (task_id=%s)", task_id)
-            if enhance_token and not self._has_current_token(result_path, enhance_token, generation_token):
+            if (enhance_token or generation_token) and not self._has_current_token(
+                result_path,
+                enhance_token,
+                generation_token,
+            ):
                 logger.info("Skip stale visual enhancement failure status (task_id=%s)", task_id)
                 return False
             if inserted_count > 0:
@@ -219,18 +238,22 @@ class VisualEnhancementService:
         status: str,
         message: str,
     ) -> bool:
-        if enhance_token and not cls._has_current_token(result_path, enhance_token, generation_token):
+        if (enhance_token or generation_token) and not cls._has_current_token(
+            result_path,
+            enhance_token,
+            generation_token,
+        ):
             logger.info("Skip stale visual enhancement status update (task_id=%s)", task_id)
             return False
         if status_writer:
             status_writer._update_status(task_id, status, message=message)
             return True
 
-        from app.services.note import NoteGenerator
+        from app.utils.task_status_writer import write_status_record
 
-        NoteGenerator.write_status(
-            task_id,
-            status,
+        write_status_record(
+            task_id=task_id,
+            status=status,
             message=message,
             generation_token=generation_token,
             output_dir=note_output_dir,
@@ -278,7 +301,7 @@ class VisualEnhancementService:
     def _has_current_token(
         cls,
         path: Path,
-        enhance_token: str,
+        enhance_token: Optional[str],
         generation_token: Optional[str] = None,
     ) -> bool:
         try:

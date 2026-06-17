@@ -169,6 +169,48 @@ class TestVisualEnhancementService(unittest.TestCase):
         self.assertTrue(any("已插入 1 张" in (message or "") for _status, message in snapshots))
         self.assertTrue(any("已插入 2 张" in (message or "") for _status, message in snapshots))
 
+    def test_incremental_updates_are_preserved_when_agent_returns_none(self):
+        VisualEnhancementService = self._load_service()
+        status_updates = []
+
+        class _StatusWriter:
+            def _update_status(self, task_id, status, message=None):
+                status_updates.append((task_id, getattr(status, "value", status), message))
+
+        class _ScreenshotAgent:
+            def insert_screenshots(self, markdown, video_path, duration, gpt, on_markdown_update=None):
+                on_markdown_update(
+                    markdown + "\n![](/static/screenshots/incremental.jpg)\n",
+                    10,
+                    "![](/static/screenshots/incremental.jpg)",
+                )
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result_path = self._write_result(tmp_dir)
+
+            with patch.object(VisualEnhancementService, "_reindex_task") as reindex:
+                changed = VisualEnhancementService(
+                    tmp_dir,
+                    screenshot_agent_factory=_ScreenshotAgent,
+                    status_writer=_StatusWriter(),
+                ).enhance_saved_note(
+                    "task-1",
+                    "video.mp4",
+                    60,
+                    "bilibili",
+                    enhance_token="token-1",
+                    generation_token="generation-1",
+                )
+
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(changed)
+        self.assertIn("incremental.jpg", payload["markdown"])
+        self.assertEqual(status_updates[-1][1], "SUCCESS")
+        self.assertIn("key screenshots", status_updates[-1][2])
+        reindex.assert_called_once_with("task-1")
+
     def test_enhance_saved_note_failure_keeps_base_note_successful(self):
         VisualEnhancementService = self._load_service()
         status_updates = []
@@ -349,6 +391,44 @@ class TestVisualEnhancementService(unittest.TestCase):
                 60,
                 "bilibili",
                 enhance_token="same-enhance-token",
+                generation_token="old-generation",
+            )
+
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertFalse(changed)
+        self.assertEqual(payload["markdown"], "## Demo\n")
+        self.assertEqual(status_updates, [])
+
+    def test_stale_generation_token_does_not_update_status_without_enhance_token(self):
+        VisualEnhancementService = self._load_service()
+        status_updates = []
+
+        class _StatusWriter:
+            def _update_status(self, task_id, status, message=None):
+                status_updates.append((task_id, getattr(status, "value", status), message))
+
+        class _ScreenshotAgent:
+            def insert_screenshots(self, markdown, video_path, duration, gpt, on_markdown_update=None):
+                return markdown + "\nold screenshot\n"
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result_path = self._write_result(
+                tmp_dir,
+                token=None,
+                generation_token="new-generation",
+            )
+
+            changed = VisualEnhancementService(
+                tmp_dir,
+                screenshot_agent_factory=_ScreenshotAgent,
+                status_writer=_StatusWriter(),
+            ).enhance_saved_note(
+                "task-1",
+                "video.mp4",
+                60,
+                "bilibili",
+                enhance_token=None,
                 generation_token="old-generation",
             )
 
