@@ -186,6 +186,9 @@ class DownloadAgent:
         task_id = audio_cache_file.stem.split("_")[0]
         self.update_status(task_id, status_phase)
         need_video = screenshot or video_understanding
+        self.video_path = None
+        self.video_img_urls = []
+        cached_audio_result: AudioDownloadResult | None = None
         fallback_video_path: Optional[Path] = None
 
         if audio_cache_file.exists():
@@ -193,13 +196,20 @@ class DownloadAgent:
             try:
                 data = json.loads(audio_cache_file.read_text(encoding="utf-8"))
                 cached_audio = AudioDownloadResult(**data)
+                cached_audio_result = cached_audio
                 cached_video_path = (cached_audio.video_path or "").strip() if cached_audio.video_path else ""
 
                 if need_video:
                     if cached_video_path and Path(cached_video_path).exists():
                         cached_video = Path(cached_video_path)
+                        fallback_video_path = cached_video
                         if is_screenshot_ready_video(cached_video):
                             self.video_path = cached_video
+                            cached_audio = self._annotate_video_quality(cached_audio)
+                            audio_cache_file.write_text(
+                                json.dumps(asdict(cached_audio), ensure_ascii=False, indent=2),
+                                encoding="utf-8",
+                            )
                             return cached_audio
                         logger.info("缓存视频不满足截图清晰度要求，继续重新下载视频")
                     logger.info("缓存缺少可用 video_path，继续下载视频以支持截图/视频理解")
@@ -243,7 +253,7 @@ class DownloadAgent:
                 if video_path_str and Path(video_path_str).exists():
                     self.video_path = Path(video_path_str)
                 else:
-                    self.video_path = None
+                    self.video_path = fallback_video_path
                     logger.warning("Video download did not return a usable file; continuing without screenshots.")
                 logger.info("视频下载完成：%s", self.video_path)
 
@@ -262,8 +272,19 @@ class DownloadAgent:
                     logger.info("未指定 grid_size，跳过缩略图生成")
             except Exception as exc:
                 logger.error("视频下载失败：%s", exc)
-                self.video_path = None
-                logger.warning("Video download failed; continuing without screenshots: %s", exc)
+                self.video_path = fallback_video_path
+                if self.video_path:
+                    logger.warning("Video refresh failed; continuing with cached video: %s", self.video_path)
+                else:
+                    logger.warning("Video download failed; continuing without screenshots: %s", exc)
+
+            self._report_source_limited_video(task_id)
+
+        if cached_audio_result is not None:
+            audio = self._annotate_video_quality(cached_audio_result)
+            audio_cache_file.write_text(json.dumps(asdict(audio), ensure_ascii=False, indent=2), encoding="utf-8")
+            logger.info("Reuse audio cache and update video metadata (%s)", audio_cache_file)
+            return audio
 
         try:
             logger.info("开始下载音频")
@@ -273,6 +294,10 @@ class DownloadAgent:
                 output_dir=output_path,
                 need_video=need_video,
             )
+            if not self.video_path and audio.video_path and Path(audio.video_path).exists():
+                self.video_path = Path(audio.video_path)
+                self._report_source_limited_video(task_id)
+            audio = self._annotate_video_quality(audio)
             audio_cache_file.write_text(json.dumps(asdict(audio), ensure_ascii=False, indent=2), encoding="utf-8")
             logger.info("音频下载并缓存成功 (%s)", audio_cache_file)
             return audio

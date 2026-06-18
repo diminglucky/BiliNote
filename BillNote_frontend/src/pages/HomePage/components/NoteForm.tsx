@@ -235,6 +235,7 @@ const NoteForm = () => {
     },
   })
   const currentTask = getCurrentTask()
+  const isRetrySubmitting = Boolean(currentTask?.isRetrySubmitting)
 
   /* ---- 派生状态（只 watch 一次，提高性能） ---- */
   const platform = useWatch({ control: form.control, name: 'platform' }) as string
@@ -299,7 +300,7 @@ const NoteForm = () => {
 
   /* ---- 帮助函数 ---- */
   const isGenerating = () => isRunningTaskStatus(getCurrentTask()?.status)
-  const generating = isSubmitting || isGenerating()
+  const generating = isSubmitting || isRetrySubmitting || isGenerating()
   const handleFileUpload = async (file: File, cb: (url: string) => void) => {
     const formData = new FormData()
     formData.append('file', file)

@@ -197,6 +197,114 @@ class TestNoteAgents(unittest.TestCase):
         self.assertEqual(result.video_id, "video-1")
         self.assertEqual(exceptions, [])
 
+    def test_download_agent_caches_downloaded_video_path_for_later_visual_enhancement(self):
+        class _Downloader:
+            def __init__(self, video_path):
+                self.video_path = video_path
+
+            def download_video(self, _url):
+                return str(self.video_path)
+
+            def download(self, **_kwargs):
+                return AudioDownloadResult(
+                    file_path="audio.mp3",
+                    title="video",
+                    duration=60,
+                    cover_url="",
+                    platform="bilibili",
+                    video_id="video-1",
+                    raw_info={},
+                )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            video_path = pathlib.Path(tmp_dir) / "video.mp4"
+            video_path.write_bytes(b"video")
+            cache_path = pathlib.Path(tmp_dir) / "task_audio.json"
+
+            with patch(
+                "app.agents.note_agents.video_quality_metadata",
+                return_value={"resolution": "1920x1080", "screenshot_ready": True},
+            ):
+                result = DownloadAgent(self._services()).run(
+                    DownloadRequest(
+                        video_url="https://example.com/video",
+                        platform="bilibili",
+                        quality="medium",
+                        audio_cache_file=cache_path,
+                        downloader=_Downloader(video_path),
+                        screenshot=True,
+                    )
+                )
+
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.video_path, str(video_path))
+        self.assertEqual(cached["video_path"], str(video_path))
+        self.assertEqual(cached["raw_info"]["video_quality"]["resolution"], "1920x1080")
+
+    def test_download_agent_reuses_cached_low_quality_video_when_refresh_fails(self):
+        download_calls = []
+
+        class _Downloader:
+            def download_video(self, _url):
+                raise RuntimeError("refresh failed")
+
+            def download(self, **kwargs):
+                download_calls.append(kwargs)
+                raise AssertionError("audio should be reused from cache")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            video_path = pathlib.Path(tmp_dir) / "cached-low.mp4"
+            video_path.write_bytes(b"video")
+            cache_path = pathlib.Path(tmp_dir) / "task_audio.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "file_path": "audio.mp3",
+                        "title": "video",
+                        "duration": 60,
+                        "cover_url": "",
+                        "platform": "bilibili",
+                        "video_id": "video-1",
+                        "raw_info": {},
+                        "video_path": str(video_path),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch("app.agents.note_agents.is_screenshot_ready_video", return_value=False),
+                patch(
+                    "app.agents.note_agents.video_quality_metadata",
+                    return_value={"resolution": "852x480", "screenshot_ready": False, "degraded": True},
+                ),
+                patch(
+                    "app.agents.note_agents.source_limited_screenshot_message",
+                    return_value="source limited",
+                ),
+            ):
+                agent = DownloadAgent(self._services())
+                result = agent.run(
+                    DownloadRequest(
+                        video_url="https://example.com/video",
+                        platform="bilibili",
+                        quality="medium",
+                        audio_cache_file=cache_path,
+                        downloader=_Downloader(),
+                        screenshot=True,
+                    )
+                )
+
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.video_path, str(video_path))
+        self.assertEqual(agent.video_path, video_path)
+        self.assertEqual(cached["video_path"], str(video_path))
+        self.assertEqual(cached["raw_info"]["video_quality"]["resolution"], "852x480")
+        self.assertEqual(download_calls, [])
+
     def test_transcript_agent_loads_cache_before_platform_subtitles(self):
         class _Downloader:
             def download_subtitles(self, _url):

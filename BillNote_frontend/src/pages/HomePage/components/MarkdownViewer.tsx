@@ -564,8 +564,11 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const [showTranscribe, setShowTranscribe] = useState(false)
   const [showChat, setShowChat] = useState<false | 'half' | 'full'>(false)
   const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
-  const isTaskRunning = currentTask && isRunningTaskStatus(taskStatus)
+  const isRetrySubmitting = Boolean(currentTask?.isRetrySubmitting)
+  const isTaskRunning = Boolean(currentTask && (isRunningTaskStatus(taskStatus) || isRetrySubmitting))
   const runningMessage = taskStatusMessage(taskStatus, taskMessage)
+  const progressStatus = isRetrySubmitting ? 'PENDING' : taskStatus
+  const progressMessage = isRetrySubmitting ? '正在提交重新生成请求，旧笔记会先保留' : runningMessage
 
   // 缓存 ReactMarkdown components，仅在 baseURL 变化时重建
   const markdownComponents = useMemo(() => createMarkdownComponents(baseURL), [baseURL])
@@ -792,7 +795,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         viewMode={viewMode}
         setViewMode={setViewMode}
         isTaskRunning={Boolean(isTaskRunning)}
-        taskStatus={taskStatus}
+        taskStatus={progressStatus}
       />
 
       {viewMode === 'map' ? (
@@ -821,9 +824,9 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                       <div className="sticky top-0 z-10 border-b border-amber-200 bg-amber-50/95 px-5 py-3 text-amber-900 shadow-sm backdrop-blur">
                         <div className="mb-2 flex items-center gap-2 text-sm">
                           <Loader2 className="h-4 w-4 animate-spin" />
-                          <span>{runningMessage}</span>
+                          <span>{progressMessage}</span>
                         </div>
-                        <StepBar steps={taskSteps} currentStep={taskStatus} compact />
+                        <StepBar steps={taskSteps} currentStep={progressStatus} compact />
                       </div>
                     )}
                     {status === 'failed' && markdownVersions.length > 0 && (
