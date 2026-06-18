@@ -1,5 +1,6 @@
 import datetime
 import json
+import logging
 import os
 import re
 from typing import Union, Optional
@@ -20,11 +21,13 @@ from app.utils.video_quality import (
     is_screenshot_ready_video,
     quarantine_low_quality_video,
     restore_quarantined_video,
+    screenshot_quality_failure_message,
 )
 from dotenv import load_dotenv
 
 load_dotenv()
 DOUYIN_DOMAIN = "https://www.douyin.com"
+logger = logging.getLogger(__name__)
 
 cfm=CookieConfigManager()
 def get_timestamp(unit: str = "milli"):
@@ -299,6 +302,11 @@ class DouyinDownloader(Downloader):
                 restore_quarantined_video(low_quality_cache_path, video_path)
                 raise
 
+            if not os.path.exists(output_path):
+                restore_quarantined_video(low_quality_cache_path, video_path)
+                raise FileNotFoundError(f"视频文件未找到: {output_path}")
+            if not is_screenshot_ready_video(output_path):
+                logger.warning("%s；继续使用当前视频生成笔记。", screenshot_quality_failure_message(output_path))
             cleanup_quarantined_video(low_quality_cache_path)
 
             return output_path

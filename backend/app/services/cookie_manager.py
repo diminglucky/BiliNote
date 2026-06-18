@@ -3,9 +3,14 @@ from pathlib import Path
 from typing import Optional, Dict
 
 
+BASE_DIR = Path(__file__).resolve().parents[2]
+
+
 class CookieConfigManager:
     def __init__(self, filepath: str = "config/downloader.json"):
         self.path = Path(filepath)
+        if not self.path.is_absolute():
+            self.path = BASE_DIR / self.path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             self._write({})

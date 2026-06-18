@@ -65,6 +65,8 @@ class VisualSectionPlan:
     reasons: List[str]
     line_index: int
     context: str = ""
+    insert_line: Optional[int] = None
+    insert_reason: str = ""
 
 
 @dataclass
@@ -78,6 +80,7 @@ class VisualSectionAnalysis:
     screenshot_times: List[int]
     suggested_count: int
     body: str
+    insert_lines: List[int]
 
 
 @dataclass
@@ -345,6 +348,11 @@ class VisualScreenshotAgent:
             image_markdown = f"![]({self.image_url(candidate.path)})"
             if slot.mode == "marker" and slot.marker:
                 state.markdown = state.markdown.replace(slot.marker, image_markdown, 1)
+            elif slot.plan and slot.plan.insert_line is not None:
+                state.markdown = self.insert_images_at_document_lines(
+                    state.markdown,
+                    [(slot.plan.insert_line, image_markdown)],
+                )
             else:
                 state.markdown = self.insert_fallback_images_near_sections(
                     state.markdown,
@@ -555,6 +563,47 @@ class VisualScreenshotAgent:
         return "\n".join(output).rstrip() + "\n"
 
     @staticmethod
+    def insert_images_at_document_lines(
+        markdown: str,
+        placements: List[Tuple[int, str]],
+    ) -> str:
+        if not placements:
+            return markdown
+
+        lines = markdown.rstrip().splitlines()
+        if not lines:
+            return "\n".join(image for _, image in placements).rstrip() + "\n"
+
+        inserts: dict[int, List[str]] = {}
+        for line_idx, image_line in placements:
+            safe_idx = max(0, min(len(lines), line_idx))
+            inserts.setdefault(safe_idx, []).append(image_line)
+
+        output: List[str] = []
+        for idx, line in enumerate(lines):
+            output.append(line)
+            after_idx = idx + 1
+            if after_idx in inserts:
+                if output and output[-1].strip():
+                    output.append("")
+                output.extend(inserts[after_idx])
+                output.append("")
+
+        if 0 in inserts:
+            prefix: List[str] = []
+            prefix.extend(inserts[0])
+            if prefix and lines:
+                prefix.append("")
+            output = prefix + output
+
+        if len(lines) in inserts:
+            existing_insert_count = len(inserts[len(lines)])
+            if existing_insert_count and output[-existing_insert_count:] == inserts[len(lines)]:
+                return "\n".join(output).rstrip() + "\n"
+
+        return "\n".join(output).rstrip() + "\n"
+
+    @staticmethod
     def filter_screenshot_matches_by_structure(
         markdown: str,
         matches: List[Tuple[str, int]],
@@ -702,6 +751,89 @@ class VisualScreenshotAgent:
                     score += weight * min(count, 3)
                     reasons.append(keyword)
         return score, reasons
+
+    @staticmethod
+    def line_visual_score(line: str, in_code_block: bool = False) -> Tuple[float, List[str]]:
+        stripped = line.strip()
+        if not stripped:
+            return 0.0, []
+        if re.match(r"^#{1,6}\s+", stripped):
+            return 0.0, []
+        if "Screenshot-" in stripped or re.match(r"^!\[[^\]]*\]\(", stripped):
+            return 0.0, []
+
+        score, reasons = VisualScreenshotAgent.visual_keyword_score(stripped)
+        if in_code_block:
+            score += 2.4
+            reasons.append("code-line")
+        if re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", line):
+            score += 0.7
+            reasons.append("step-line")
+        if re.search(r"`[^`]+`", line):
+            score += 0.7
+            reasons.append("inline-code")
+        if any(word in stripped for word in ["最终", "结果", "输出", "成功", "失败", "报错", "验证", "完成"]):
+            score += 1.1
+            reasons.append("result-line")
+        if any(word in stripped for word in ["打开", "点击", "选择", "输入", "运行", "执行", "安装", "配置", "创建"]):
+            score += 0.9
+            reasons.append("operation-line")
+        return score, reasons[:6]
+
+    @classmethod
+    def choose_section_insert_lines(
+        cls,
+        lines: List[str],
+        start_line: int,
+        end_line: int,
+        count: int,
+    ) -> List[int]:
+        count = max(1, min(count, 4))
+        candidates: List[Tuple[float, int, List[str]]] = []
+        in_code_block = False
+        code_block_start: Optional[int] = None
+
+        for line_idx in range(start_line + 1, end_line):
+            line = lines[line_idx]
+            if line.strip().startswith("```"):
+                if not in_code_block:
+                    code_block_start = line_idx
+                else:
+                    insert_line = line_idx + 1
+                    candidates.append((3.4, insert_line, ["code-block-end"]))
+                    code_block_start = None
+                in_code_block = not in_code_block
+                continue
+
+            score, reasons = cls.line_visual_score(line, in_code_block)
+            if score <= 0:
+                continue
+            insert_line = line_idx + 1
+            if in_code_block and code_block_start is not None:
+                insert_line = line_idx + 1
+            candidates.append((score, insert_line, reasons))
+
+        if not candidates:
+            return [min(end_line, start_line + 1)]
+
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+        selected: List[int] = []
+        min_line_gap = 4
+        for _score, line_idx, _reasons in candidates:
+            if any(abs(line_idx - existing) < min_line_gap for existing in selected):
+                continue
+            selected.append(line_idx)
+            if len(selected) >= count:
+                break
+
+        if len(selected) < count:
+            for _score, line_idx, _reasons in candidates:
+                if line_idx not in selected:
+                    selected.append(line_idx)
+                if len(selected) >= count:
+                    break
+
+        return sorted(selected[:count])
 
     @staticmethod
     def section_anchor_times(start: int, end: int, count: int) -> List[int]:
@@ -1114,6 +1246,14 @@ class VisualScreenshotAgent:
             code_block_count = max(0, body.count("```") // 2)
             subsection_count = len(re.findall(r"^#{3,6}\s+", body, flags=re.MULTILINE))
             step_count = len(re.findall(r"^\s*(?:[-*+]|\d+[.)])\s+", body, flags=re.MULTILINE))
+            suggested_count = self.suggested_screenshot_count(
+                score,
+                screenshot_times,
+                code_block_count,
+                subsection_count,
+                step_count,
+            )
+            insert_lines = self.choose_section_insert_lines(lines, line_index, next_line, suggested_count)
             analyses.append(VisualSectionAnalysis(
                 title=title,
                 line_index=line_index,
@@ -1122,14 +1262,9 @@ class VisualScreenshotAgent:
                 score=score,
                 reasons=reasons[:6],
                 screenshot_times=screenshot_times,
-                suggested_count=self.suggested_screenshot_count(
-                    score,
-                    screenshot_times,
-                    code_block_count,
-                    subsection_count,
-                    step_count,
-                ),
+                suggested_count=suggested_count,
                 body=(body + ("\n\n相关字幕：\n" + aligned_context if aligned_context else "")),
+                insert_lines=insert_lines,
             ))
         return analyses
 
@@ -1209,6 +1344,11 @@ class VisualScreenshotAgent:
                 plan_end = anchor_times[anchor_idx + 1] if anchor_idx + 1 < len(anchor_times) else analysis.end
                 if total_duration:
                     plan_end = max(ts + 1, min(total_duration - 1, plan_end))
+                insert_line = (
+                    analysis.insert_lines[min(anchor_idx, len(analysis.insert_lines) - 1)]
+                    if analysis.insert_lines
+                    else None
+                )
                 plans.append(VisualSectionPlan(
                     title=analysis.title,
                     start=ts,
@@ -1217,6 +1357,8 @@ class VisualScreenshotAgent:
                     reasons=analysis.reasons,
                     line_index=analysis.line_index,
                     context=analysis.body[:1800],
+                    insert_line=insert_line,
+                    insert_reason="document-section",
                 ))
 
         filtered: List[VisualSectionPlan] = []

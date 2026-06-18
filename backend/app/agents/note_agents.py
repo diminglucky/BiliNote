@@ -13,8 +13,12 @@ from app.models.audio_model import AudioDownloadResult
 from app.models.gpt_model import GPTSource
 from app.models.transcriber_model import TranscriptResult
 from app.models.transcriber_model import TranscriptSegment
-from app.utils.note_helper import replace_content_markers
-from app.utils.video_quality import is_screenshot_ready_video
+from app.utils.note_helper import normalize_markdown_toc, replace_content_markers
+from app.utils.video_quality import (
+    is_screenshot_ready_video,
+    source_limited_screenshot_message,
+    video_quality_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +150,24 @@ class DownloadAgent:
     def handle_exception(self, task_id: Optional[str], exc: Exception) -> None:
         self.services.handle_exception(task_id, exc)
 
+    def _annotate_video_quality(self, audio: AudioDownloadResult) -> AudioDownloadResult:
+        if not self.video_path:
+            return audio
+        audio.video_path = str(self.video_path)
+        if audio.raw_info is None:
+            audio.raw_info = {}
+        audio.raw_info["video_quality"] = video_quality_metadata(self.video_path)
+        return audio
+
+    def _report_source_limited_video(self, task_id: Optional[str]) -> None:
+        if not self.video_path:
+            return
+        message = source_limited_screenshot_message(self.video_path)
+        if not message:
+            return
+        logger.warning("%s", message)
+        self.update_status(task_id, TaskStatus.DOWNLOADING, message=message)
+
     def download_media(
         self,
         downloader: Any,
@@ -164,6 +186,7 @@ class DownloadAgent:
         task_id = audio_cache_file.stem.split("_")[0]
         self.update_status(task_id, status_phase)
         need_video = screenshot or video_understanding
+        fallback_video_path: Optional[Path] = None
 
         if audio_cache_file.exists():
             logger.info("检测到音频缓存 (%s)，直接读取", audio_cache_file)
@@ -217,10 +240,14 @@ class DownloadAgent:
             try:
                 logger.info("开始下载视频")
                 video_path_str = downloader.download_video(video_url)
-                self.video_path = Path(video_path_str)
+                if video_path_str and Path(video_path_str).exists():
+                    self.video_path = Path(video_path_str)
+                else:
+                    self.video_path = None
+                    logger.warning("Video download did not return a usable file; continuing without screenshots.")
                 logger.info("视频下载完成：%s", self.video_path)
 
-                if grid_size and os.getenv("BILINOTE_LEGACY_VIDEO_GRID", "").lower() in {"1", "true", "yes"}:
+                if self.video_path and grid_size and os.getenv("BILINOTE_LEGACY_VIDEO_GRID", "").lower() in {"1", "true", "yes"}:
                     from app.utils.video_reader import VideoReader
 
                     self.video_img_urls = VideoReader(
@@ -235,8 +262,8 @@ class DownloadAgent:
                     logger.info("未指定 grid_size，跳过缩略图生成")
             except Exception as exc:
                 logger.error("视频下载失败：%s", exc)
-                self.handle_exception(task_id, exc)
-                raise
+                self.video_path = None
+                logger.warning("Video download failed; continuing without screenshots: %s", exc)
 
         try:
             logger.info("开始下载音频")
@@ -409,6 +436,7 @@ class NoteWriterAgent:
 
         try:
             markdown = gpt.summarize(source)
+            markdown = normalize_markdown_toc(markdown, ensure_toc="toc" in formats) or markdown
             markdown_cache_file.write_text(markdown, encoding="utf-8")
             logger.info("GPT 总结并缓存成功 (%s)", markdown_cache_file)
             return markdown
@@ -451,7 +479,8 @@ class MarkdownComposerAgent:
         transcript_segments: Optional[list[Any]] = None,
     ) -> str:
         if "screenshot" in formats and not video_path:
-            raise RuntimeError("截图已启用，但没有可用的视频文件")
+            logger.warning("截图已启用，但没有可用的视频文件；继续输出无截图笔记")
+            formats = [item for item in formats if item != "screenshot"]
 
         if "screenshot" in formats and video_path:
             try:
@@ -477,9 +506,8 @@ class MarkdownComposerAgent:
                     )
                 if updated is not None:
                     markdown = updated
-            except Exception:
-                logger.exception("截图插入失败")
-                raise
+            except Exception as exc:
+                logger.exception("截图插入失败，继续输出基础笔记: %s", exc)
 
         if "link" in formats:
             try:
@@ -487,7 +515,7 @@ class MarkdownComposerAgent:
             except Exception as exc:
                 logger.warning("链接插入失败，跳过该步骤：%s", exc)
 
-        return markdown
+        return normalize_markdown_toc(markdown, ensure_toc="toc" in formats) or markdown
 
 
 class ChatRagAgent:

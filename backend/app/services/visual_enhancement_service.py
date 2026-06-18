@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
+from app.utils.note_helper import normalize_markdown_toc
+
 
 DEFAULT_NOTE_OUTPUT_DIR = os.getenv("NOTE_OUTPUT_DIR", "note_results")
 DEFAULT_IMAGE_OUTPUT_DIR = os.getenv("OUT_DIR", "./static/screenshots")
@@ -116,7 +118,7 @@ class VisualEnhancementService:
                     logger.info("Skip stale visual enhancement increment (task_id=%s)", task_id)
                     return
                 inserted_count += 1
-                latest_payload["markdown"] = markdown_snapshot
+                latest_payload["markdown"] = normalize_markdown_toc(markdown_snapshot) or markdown_snapshot
                 self._atomic_write_json(result_path, latest_payload)
                 self._update_status_if_current(
                     result_path,
@@ -177,7 +179,7 @@ class VisualEnhancementService:
                 )
                 return False
 
-            latest_payload["markdown"] = enhanced
+            latest_payload["markdown"] = normalize_markdown_toc(enhanced) or enhanced
             self._atomic_write_json(result_path, latest_payload)
             self._reindex_task(task_id)
             self._update_status_if_current(
@@ -330,7 +332,7 @@ def note_to_json_payload(note: Any) -> dict[str, Any]:
         return value
 
     return {
-        "markdown": note.markdown,
+        "markdown": normalize_markdown_toc(note.markdown) or note.markdown,
         "transcript": convert(note.transcript),
         "audio_meta": convert(note.audio_meta),
         "enhance_token": getattr(note, "enhance_token", None),

@@ -17,6 +17,8 @@ from app.utils.video_quality import (
     is_screenshot_ready_video,
     quarantine_low_quality_video,
     restore_quarantined_video,
+    screenshot_quality_failure_message,
+    screenshot_video_format_selector,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,7 +104,7 @@ class YoutubeDownloader(Downloader, ABC):
         output_path = os.path.join(output_dir, "%(id)s.%(ext)s")
 
         ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',
+            'format': screenshot_video_format_selector(),
             'outtmpl': output_path,
             'noplaylist': True,
             'quiet': False,
@@ -123,8 +125,7 @@ class YoutubeDownloader(Downloader, ABC):
             restore_quarantined_video(low_quality_cache_path, video_path)
             raise FileNotFoundError(f"视频文件未找到: {video_path}")
         if not is_screenshot_ready_video(video_path):
-            restore_quarantined_video(low_quality_cache_path, video_path)
-            raise RuntimeError("下载的视频清晰度不足，无法生成清晰截图")
+            logger.warning("%s；继续使用当前视频生成笔记。", screenshot_quality_failure_message(video_path))
         cleanup_quarantined_video(low_quality_cache_path)
 
         return video_path

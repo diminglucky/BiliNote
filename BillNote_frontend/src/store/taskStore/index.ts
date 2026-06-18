@@ -228,8 +228,6 @@ export const useTaskStore = create<TaskStore>()(
         if (!task) return
 
         const newFormData = payload || task.formData
-        const previousStatus = task.status
-        const previousMessage = task.message
         const previousGenerationToken = task.generationToken
         set(state => ({
           tasks: state.tasks.map(t =>
@@ -270,13 +268,14 @@ export const useTaskStore = create<TaskStore>()(
             ),
           }))
         } catch (e: any) {
+          const errorMessage = e?.msg || e?.message || '重新生成请求提交失败，请检查后端状态后再试'
           set(state => ({
             tasks: state.tasks.map(t =>
                 t.id === id
                     ? {
                       ...t,
-                      status: previousStatus,
-                      message: previousMessage,
+                      status: 'FAILED',
+                      message: errorMessage,
                       generationToken: previousGenerationToken,
                       isRetrySubmitting: false,
                     }

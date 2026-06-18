@@ -40,7 +40,7 @@ Note quality requirements:
 - Use Chinese for the note body, but keep technical names such as ReAct, Plan and Execute, Thought, Action, Observation, Final Answer, Cursor, MANUS, and GPT-4o in English.
 """
 
-PROMPT_VERSION = "visual-code-v4"
+PROMPT_VERSION = "note-quality-v5"
 
 CHUNK_EXTRACTION_PROMPT = """
 

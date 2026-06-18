@@ -2,12 +2,25 @@ import json
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from app.enmus.task_status_enums import TaskStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _status_value(status: Union[str, TaskStatus]) -> str:
+    return status.value if isinstance(status, TaskStatus) else str(status)
+
+
+def _load_existing_status(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def write_status_record(
@@ -25,17 +38,31 @@ def write_status_record(
     note_output_dir.mkdir(parents=True, exist_ok=True)
     status_file = note_output_dir / f"{task_id}.status.json"
 
-    if generation_token and status_file.exists() and not force:
-        try:
-            existing = json.loads(status_file.read_text(encoding="utf-8"))
-            existing_token = existing.get("generation_token")
-            if existing_token and existing_token != generation_token:
-                logger.info("Skip stale status update (task_id=%s)", task_id)
-                return
-        except Exception as exc:
-            logger.debug("Ignore unreadable status file while updating task status: %s", exc)
+    existing = _load_existing_status(status_file) if status_file.exists() else {}
+    if generation_token and existing and not force:
+        existing_token = existing.get("generation_token")
+        if existing_token and existing_token != generation_token:
+            logger.info("Skip stale status update (task_id=%s)", task_id)
+            return
 
-    data = {"status": status.value if isinstance(status, TaskStatus) else status}
+    now = time.time()
+    status_text = _status_value(status)
+    previous_history = existing.get("history") if isinstance(existing.get("history"), list) else []
+    if force:
+        previous_history = []
+
+    event = {
+        "status": status_text,
+        "timestamp": now,
+    }
+    if message:
+        event["message"] = message
+
+    data = {
+        "status": status_text,
+        "updated_at": now,
+        "history": [*previous_history, event],
+    }
     if generation_token:
         data["generation_token"] = generation_token
     if message:

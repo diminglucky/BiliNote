@@ -280,7 +280,11 @@ class PlanExecutor:
         if not context.markdown:
             raise RuntimeError("Cannot plan screenshots before markdown is ready")
         if not context.video_path:
-            raise RuntimeError("截图已启用，但没有可用的视频文件")
+            logger.warning("截图已启用，但没有可用的视频文件；跳过截图规划")
+            context.visual_state = None
+            context.visual_slot_results = []
+            context.diagnostics.append("plan_visuals: skipped because video file is unavailable")
+            return
         agent = self.markdown_composer_agent.screenshot_agent()
         state = VisualScreenshotState(
             markdown=context.markdown,
@@ -298,6 +302,8 @@ class PlanExecutor:
     def _select_frames(self, context: AgentRuntimeContext) -> None:
         if context.visual_state is None:
             self._plan_visuals(context)
+        if context.visual_state is None:
+            return
         state = context.visual_state
         slots = state.slots or []
         if not slots:
@@ -335,6 +341,20 @@ class PlanExecutor:
 
         if context.visual_state is None:
             self._plan_visuals(context)
+        if context.visual_state is None:
+            context.diagnostics.append("compose_markdown: skipped screenshots because visual planning was unavailable")
+            context.markdown = self.markdown_composer_agent.run(
+                MarkdownComposeRequest(
+                    markdown=context.markdown,
+                    video_path=context.video_path,
+                    formats=[item for item in formats if item != "screenshot"],
+                    audio_meta=context.audio_meta,
+                    platform=context.platform,
+                    gpt=context.gpt,
+                    transcript_segments=context.transcript.segments if context.transcript else [],
+                )
+            )
+            return
         if context.visual_slot_results == [] and (context.visual_state.slots or []):
             self._select_frames(context)
 

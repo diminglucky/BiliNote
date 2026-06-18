@@ -337,6 +337,18 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
     logger.info(f"已写入客户端预取字幕缓存: {target} ({len(cleaned_segments)} 段)")
 
 
+def _has_usable_transcript_cache(task_id: Optional[str]) -> bool:
+    if not task_id:
+        return False
+    transcript_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}_transcript.json")
+    if not os.path.exists(transcript_path):
+        return False
+    transcript = _load_json_file_safely(transcript_path, retries=1)
+    if not isinstance(transcript, dict):
+        return False
+    return bool(str(transcript.get("full_text") or "").strip() or transcript.get("segments"))
+
+
 def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
                   link: bool = False, screenshot: bool = False, model_name: str = None, provider_id: str = None,
                   _format: list = None, style: str = None, extras: str = None, video_understanding: bool = False,
@@ -442,7 +454,7 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
         # 就绪门禁：本地转写引擎（fast-whisper / mlx-whisper）必须等模型下载完才能跑视频，
         # 否则任务会卡在首次下载（慢 / OOM / 截断），用户只看到一个静默失败的任务。
         # 客户端已抓好字幕（prefetched_transcript）则不需要转写，跳过检查。
-        if not data.prefetched_transcript:
+        if not data.prefetched_transcript and not _has_usable_transcript_cache(data.task_id):
             from app.services.transcriber_config_manager import TranscriberConfigManager
             readiness = TranscriberConfigManager().is_model_ready()
             if not readiness["ready"]:

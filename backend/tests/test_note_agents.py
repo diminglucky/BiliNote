@@ -158,6 +158,45 @@ class TestNoteAgents(unittest.TestCase):
             )
         )
 
+    def test_download_agent_continues_when_video_download_fails_for_screenshots(self):
+        exceptions = []
+
+        class _Downloader:
+            def download_video(self, _url):
+                raise RuntimeError("video unavailable")
+
+            def download(self, **kwargs):
+                return AudioDownloadResult(
+                    file_path="audio.mp3",
+                    title="video",
+                    duration=60,
+                    cover_url="",
+                    platform="bilibili",
+                    video_id="video-1",
+                    raw_info={},
+                )
+
+        services = AgentRuntimeServices(
+            update_status=lambda *_args: None,
+            handle_exception=lambda task_id, exc: exceptions.append((task_id, exc)),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = pathlib.Path(tmp_dir) / "task_audio.json"
+            result = DownloadAgent(services).run(
+                DownloadRequest(
+                    video_url="https://example.com/video",
+                    platform="bilibili",
+                    quality="medium",
+                    audio_cache_file=cache_path,
+                    downloader=_Downloader(),
+                    screenshot=True,
+                )
+            )
+
+        self.assertEqual(result.video_id, "video-1")
+        self.assertEqual(exceptions, [])
+
     def test_transcript_agent_loads_cache_before_platform_subtitles(self):
         class _Downloader:
             def download_subtitles(self, _url):
@@ -670,6 +709,83 @@ class TestNoteAgents(unittest.TestCase):
 
         self.assertEqual(result.markdown, "## Important *Content-[00:01]\n")
         self.assertTrue(any("plan_visuals: optional step failed" in item for item in result.diagnostics))
+
+    def test_plan_executor_keeps_base_note_when_screenshot_video_missing(self):
+        transcript = TranscriptResult(
+            language="zh",
+            full_text="hello",
+            segments=[TranscriptSegment(start=0, end=1, text="hello")],
+        )
+        audio = AudioDownloadResult(
+            file_path="audio.mp3",
+            title="video",
+            duration=60,
+            cover_url="",
+            platform="bilibili",
+            video_id="video-1",
+            raw_info={},
+        )
+
+        class _TranscriptAgent:
+            def load_cached_or_platform_subtitles(self, **_kwargs):
+                return transcript
+
+        class _DownloadAgent:
+            video_path = None
+            video_img_urls = []
+
+            @staticmethod
+            def needs_full_download(**_kwargs):
+                return True
+
+            def run(self, _request):
+                return audio
+
+        class _WriterAgent:
+            def run(self, _request):
+                return "## Base note\n"
+
+        class _ComposerAgent:
+            def screenshot_agent(self):
+                raise AssertionError("screenshot agent should not run without a video path")
+
+            def run(self, request):
+                return request.markdown
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            plan = build_note_execution_plan(
+                AgentExecutionContext(
+                    task_id="task-1",
+                    video_url="https://example.com/video",
+                    platform="bilibili",
+                    quality="medium",
+                    formats=("screenshot",),
+                    screenshot=True,
+                    defer_screenshots=False,
+                )
+            )
+            context = AgentRuntimeContext(
+                task_id="task-1",
+                video_url="https://example.com/video",
+                platform="bilibili",
+                quality="medium",
+                formats=["screenshot"],
+                wants_screenshot=True,
+                wants_link=False,
+                note_output_dir=pathlib.Path(tmp_dir),
+                downloader=object(),
+                gpt=object(),
+            )
+
+            result = PlanExecutor(
+                download_agent=_DownloadAgent(),
+                transcript_agent=_TranscriptAgent(),
+                note_writer_agent=_WriterAgent(),
+                markdown_composer_agent=_ComposerAgent(),
+            ).run(plan, context)
+
+        self.assertEqual(result.markdown, "## Base note\n")
+        self.assertTrue(any("video file is unavailable" in item for item in result.diagnostics))
 
     def test_generate_treats_link_format_as_link_request_for_note_writer(self):
         captured = {}

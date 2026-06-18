@@ -315,6 +315,7 @@ cython_debug/
 # Generated notes, media caches, screenshots, and task artifacts.
 /note_results/
 /backend/note_results/
+/backend/benchmark_reports/
 /backend/data/
 /backend/static/screenshots/
 /backend/data/output_frames/

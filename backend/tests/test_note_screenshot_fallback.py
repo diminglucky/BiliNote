@@ -303,7 +303,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
 
         self.assertEqual(state.execution_engine, "langgraph")
 
-    def test_markdown_composer_propagates_screenshot_errors(self):
+    def test_markdown_composer_keeps_base_note_when_screenshot_errors(self):
         audio_meta = type("_AudioMeta", (), {"duration": 120, "video_id": "BV1xx"})()
         screenshot_agent = type(
             "_ScreenshotAgent",
@@ -317,30 +317,32 @@ class TestNoteScreenshotFallback(unittest.TestCase):
         )
 
         with patch.object(note_module.logger, "exception"):
-            with self.assertRaisesRegex(RuntimeError, "graph failed"):
-                note_module.MarkdownComposerAgent(services).post_process_markdown(
-                    markdown="## Demo *Content-[00:10]\n",
-                    video_path=pathlib.Path("video.mp4"),
-                    formats=["screenshot"],
-                    audio_meta=audio_meta,
-                    platform="bilibili",
-                )
+            result = note_module.MarkdownComposerAgent(services).post_process_markdown(
+                markdown="## Demo *Content-[00:10]\n",
+                video_path=pathlib.Path("video.mp4"),
+                formats=["screenshot"],
+                audio_meta=audio_meta,
+                platform="bilibili",
+            )
 
-    def test_markdown_composer_fails_when_screenshot_requested_without_video(self):
+        self.assertEqual(result, "## Demo *Content-[00:10]\n")
+
+    def test_markdown_composer_keeps_base_note_when_screenshot_requested_without_video(self):
         audio_meta = type("_AudioMeta", (), {"duration": 120, "video_id": "BV1xx"})()
         services = note_module.AgentRuntimeServices(
             update_status=lambda *_args: None,
             handle_exception=lambda *_args: None,
         )
 
-        with self.assertRaisesRegex(RuntimeError, "没有可用的视频文件"):
-            note_module.MarkdownComposerAgent(services).post_process_markdown(
-                markdown="## Demo *Content-[00:10]\n",
-                video_path=None,
-                formats=["screenshot"],
-                audio_meta=audio_meta,
-                platform="bilibili",
-            )
+        result = note_module.MarkdownComposerAgent(services).post_process_markdown(
+            markdown="## Demo *Content-[00:10]\n",
+            video_path=None,
+            formats=["screenshot"],
+            audio_meta=audio_meta,
+            platform="bilibili",
+        )
+
+        self.assertEqual(result, "## Demo *Content-[00:10]\n")
 
     def test_summarize_text_updates_main_task_status_not_markdown_cache_status(self):
         status_updates = []

@@ -147,6 +147,51 @@ class TestNoteRouterCacheRecovery(unittest.TestCase):
             self.assertTrue(transcript_path.exists())
             self.assertTrue(audio_path.exists())
 
+    def test_retry_generation_allows_missing_transcriber_model_when_transcript_cache_exists(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = pathlib.Path(tmp_dir)
+            task_id = "task-1"
+            transcript_path = output_dir / f"{task_id}_transcript.json"
+            transcript_path.write_text(
+                json.dumps(
+                    {
+                        "language": "zh",
+                        "full_text": "cached transcript",
+                        "segments": [{"start": 0, "end": 1, "text": "cached transcript"}],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            background_tasks = note_router.BackgroundTasks()
+
+            with patch.object(note_router, "NOTE_OUTPUT_DIR", str(output_dir)):
+                with patch(
+                    "app.services.transcriber_config_manager.TranscriberConfigManager.is_model_ready",
+                    return_value={
+                        "ready": False,
+                        "reason": "model missing",
+                        "transcriber_type": "fast-whisper",
+                        "model_size": "tiny",
+                        "downloading": False,
+                    },
+                ):
+                    response = note_router.generate_note(
+                        note_router.VideoRequest(
+                            video_url="https://www.bilibili.com/video/BV1xx411c7mD",
+                            platform="bilibili",
+                            quality="medium",
+                            model_name="demo",
+                            provider_id="provider",
+                            task_id=task_id,
+                        ),
+                        background_tasks=background_tasks,
+                    )
+
+            payload = json.loads(response.body.decode("utf-8"))
+            self.assertEqual(payload["code"], 0)
+            self.assertEqual(payload["data"]["task_id"], task_id)
+
     def test_status_with_new_generation_token_does_not_return_old_result(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_dir = pathlib.Path(tmp_dir)

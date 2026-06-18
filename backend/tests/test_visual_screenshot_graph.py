@@ -454,6 +454,7 @@ class TestVisualScreenshotGraph(unittest.TestCase):
                 score=5.0,
                 reasons=["screen"],
                 line_index=1,
+                insert_line=2,
             )
         ]
 
@@ -480,6 +481,7 @@ class TestVisualScreenshotGraph(unittest.TestCase):
         self.assertEqual(analyses[0].title, "Code result walkthrough")
         self.assertGreaterEqual(analyses[0].suggested_count, 2)
         self.assertIn("code-block", analyses[0].reasons)
+        self.assertTrue(analyses[0].insert_lines)
 
     def test_section_analyzer_uses_transcript_alignment_when_content_marker_is_missing(self):
         from app.services.visual_screenshot_agent import VisualScreenshotAgent
@@ -503,6 +505,51 @@ class TestVisualScreenshotGraph(unittest.TestCase):
         self.assertEqual(analyses[0].title, "UI 操作演示")
         self.assertLessEqual(analyses[0].start, 18)
         self.assertIn("transcript-align", analyses[0].reasons)
+
+    def test_document_planner_places_image_after_relevant_line(self):
+        from app.services.visual_screenshot_agent import VisualScreenshotAgent
+
+        markdown = (
+            "## 工具安装 *Content-[00:00]\n"
+            "先介绍工具背景。\n"
+            "运行安装命令并检查终端输出。\n"
+            "```bash\n"
+            "pnpm install\n"
+            "```\n"
+            "最终页面显示安装成功。\n\n"
+            "## 纯概念说明 *Content-[02:00]\n"
+            "这里只讲背景和定义。\n"
+        )
+        agent = VisualScreenshotAgent(".", "/static/screenshots")
+
+        plans = agent.plan_visual_screenshots(markdown, 180)
+
+        self.assertTrue(plans)
+        self.assertTrue(all(plan.insert_line is not None for plan in plans))
+        self.assertTrue(any(3 <= int(plan.insert_line or 0) <= 7 for plan in plans))
+
+    def test_insert_images_at_document_lines_uses_planned_positions(self):
+        from app.services.visual_screenshot_agent import VisualScreenshotAgent
+
+        markdown = (
+            "## 工具安装 *Content-[00:00]\n"
+            "先介绍工具背景。\n"
+            "运行安装命令并检查终端输出。\n"
+            "```bash\n"
+            "pnpm install\n"
+            "```\n"
+            "最终页面显示安装成功。\n\n"
+            "## 下一节 *Content-[02:00]\n"
+            "下一节正文。\n"
+        )
+
+        result = VisualScreenshotAgent.insert_images_at_document_lines(
+            markdown,
+            [(6, "![](/static/screenshots/install.jpg)")],
+        )
+
+        self.assertLess(result.index("install.jpg"), result.index("最终页面显示安装成功"))
+        self.assertLess(result.index("install.jpg"), result.index("## 下一节"))
 
     def test_plan_visual_screenshots_prefers_explicit_markers_over_duration(self):
         from app.services.visual_screenshot_agent import VisualScreenshotAgent

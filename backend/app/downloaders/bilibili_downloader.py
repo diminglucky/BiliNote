@@ -19,8 +19,11 @@ from app.services.cookie_manager import CookieConfigManager
 from app.utils.video_quality import (
     cleanup_quarantined_video,
     is_screenshot_ready_video,
+    probe_video_size,
     quarantine_low_quality_video,
     restore_quarantined_video,
+    screenshot_quality_failure_message,
+    screenshot_video_format_selector,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,13 +36,31 @@ class BilibiliDownloader(Downloader, ABC):
     def __init__(self):
         super().__init__()
         self._cookie_mgr = CookieConfigManager()
-        self._cookie = self._cookie_mgr.get('bilibili')
-        self._cookiefile = self._write_netscape_cookie_file()
+        self._cookie = ""
+        self._cookiefile = None
+
+    def _refresh_cookie(self) -> None:
+        cookie_mgr = getattr(self, "_cookie_mgr", None)
+        if cookie_mgr is None:
+            cookie_mgr = CookieConfigManager()
+            self._cookie_mgr = cookie_mgr
+
+        current_cookie = cookie_mgr.get('bilibili') or ""
+        current_cookie = current_cookie.strip()
+        if current_cookie == getattr(self, "_cookie", "") and getattr(self, "_cookiefile", None) and os.path.exists(self._cookiefile):
+            return
+        self._cookie = current_cookie
+        if getattr(self, "_cookiefile", None) and os.path.exists(self._cookiefile):
+            try:
+                os.remove(self._cookiefile)
+            except Exception:
+                pass
+        self._cookiefile = self._write_netscape_cookie_file() if self._cookie else None
 
     def _write_netscape_cookie_file(self) -> Optional[str]:
-        """将 Cookie 写入 Netscape 格式临时文件，返回文件路径（供 yt-dlp cookiefile 使用）"""
+        """Write Bilibili cookies to a Netscape-format file for yt-dlp."""
         if not self._cookie:
-            logger.warning("B站 Cookie 未配置，下载可能失败")
+            logger.warning("Bilibili cookie is not configured; download may fail")
             return None
         lines = ["# Netscape HTTP Cookie File\n"]
         for pair in self._cookie.split("; "):
@@ -49,7 +70,7 @@ class BilibiliDownloader(Downloader, ABC):
         tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
         tmp.writelines(lines)
         tmp.close()
-        logger.info("已生成 B站 Netscape Cookie 文件: %s (条目: %d)", tmp.name, len(lines) - 1)
+        logger.info("Generated Bilibili Netscape cookie file: %s (entries: %d)", tmp.name, len(lines) - 1)
         return tmp.name
 
     def download(
@@ -60,6 +81,7 @@ class BilibiliDownloader(Downloader, ABC):
         need_video: Optional[bool] = False,
         skip_download: bool = False,
     ) -> AudioDownloadResult:
+        self._refresh_cookie()
         if output_dir is None:
             output_dir = get_data_dir()
         if not output_dir:
@@ -103,13 +125,14 @@ class BilibiliDownloader(Downloader, ABC):
             if cached_audio_path and os.path.exists(cached_audio_path):
                 info = self._cached_info(video_id) or self._minimal_info(video_id)
                 return self._build_audio_result(info, cached_audio_path)
-            logger.warning("yt-dlp 下载 B 站音频失败，切换到 B 站 API 兜底下载", exc_info=True)
+            logger.warning("yt-dlp failed to download Bilibili audio; falling back to Bilibili API", exc_info=True)
             return self._download_audio_via_api(video_url, output_dir, quality)
 
         audio_path = os.path.join(output_dir, f"{info.get('id')}.mp3")
         return self._build_audio_result(info, audio_path)
 
     def _extract_info(self, video_url: str) -> dict:
+        self._refresh_cookie()
         ydl_opts = {
             'skip_download': True,
             'quiet': True,
@@ -122,7 +145,7 @@ class BilibiliDownloader(Downloader, ABC):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 return ydl.extract_info(video_url, download=False)
         except Exception:
-            logger.warning("yt-dlp 提取 B 站元信息失败，切换到 B 站 API", exc_info=True)
+            logger.warning("yt-dlp failed to extract Bilibili metadata; falling back to Bilibili API", exc_info=True)
             return self._extract_info_via_api(video_url)
 
     def _headers(self) -> dict:
@@ -141,13 +164,13 @@ class BilibiliDownloader(Downloader, ABC):
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
-            raise RuntimeError(f"B 站 API 返回错误: code={data.get('code')}, message={data.get('message')}")
+            raise RuntimeError(f"Bilibili API error: code={data.get('code')}, message={data.get('message')}")
         return data.get("data") or {}
 
     def _extract_info_via_api(self, video_url: str) -> dict:
         bvid = extract_video_id(video_url, "bilibili")
         if not bvid:
-            raise RuntimeError("无法从 B 站链接提取 BV 号")
+            raise RuntimeError("Unable to extract BV id from Bilibili URL")
 
         data = self._api_get(
             "https://api.bilibili.com/x/web-interface/view",
@@ -167,14 +190,16 @@ class BilibiliDownloader(Downloader, ABC):
         bvid = info.get("id")
         cid = info.get("cid")
         if not bvid or not cid:
-            raise RuntimeError("B 站播放信息缺少 bvid/cid")
+            raise RuntimeError("Bilibili play info missing bvid/cid")
         return self._api_get(
             "https://api.bilibili.com/x/player/playurl",
             {
                 "bvid": bvid,
                 "cid": cid,
+                "qn": 80,
                 "fnval": 16,
                 "fourk": 1,
+                "high_quality": 1,
             },
         )
 
@@ -206,13 +231,26 @@ class BilibiliDownloader(Downloader, ABC):
                     errors.append(str(exc))
                     if os.path.exists(output_path):
                         os.remove(output_path)
-        raise RuntimeError("B 站流下载失败: " + "; ".join(errors[-3:]))
+        raise RuntimeError("Bilibili stream download failed: " + "; ".join(errors[-3:]))
 
     @staticmethod
     def _run_ffmpeg(args: List[str]) -> None:
         result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if result.returncode != 0:
-            raise RuntimeError((result.stderr or result.stdout or "ffmpeg 执行失败").strip()[-1000:])
+            raise RuntimeError((result.stderr or result.stdout or "ffmpeg failed").strip()[-1000:])
+
+    @staticmethod
+    def _video_resolution_rank(video_path: str) -> tuple[int, int]:
+        size = probe_video_size(video_path)
+        if size is None:
+            return (0, 0)
+        return size
+
+    @classmethod
+    def _is_better_video(cls, candidate_path: str, current_path: str) -> bool:
+        candidate_size = cls._video_resolution_rank(candidate_path)
+        current_size = cls._video_resolution_rank(current_path)
+        return candidate_size > current_size
 
     @staticmethod
     def _quality_bitrate(quality: DownloadQuality) -> str:
@@ -229,7 +267,7 @@ class BilibiliDownloader(Downloader, ABC):
         play_info = self._play_info_via_api(info)
         audios = (play_info.get("dash") or {}).get("audio") or []
         if not audios:
-            raise RuntimeError("B 站 API 未返回可用音频流")
+            raise RuntimeError("Bilibili API did not return an audio stream")
 
         audios = sorted(audios, key=lambda item: item.get("bandwidth") or 0, reverse=True)
         video_id = info.get("id")
@@ -255,9 +293,9 @@ class BilibiliDownloader(Downloader, ABC):
         play_info = self._play_info_via_api(info)
         videos = (play_info.get("dash") or {}).get("video") or []
         if not videos:
-            raise RuntimeError("B 站 API 未返回可用视频流")
+            raise RuntimeError("Bilibili API did not return a video stream")
 
-        # 这里只用于截图/视频理解抽帧，480P 左右更稳，也避免有 Cookie 时拉到 4K 大文件。
+        # Screenshots need a stable, clear video stream. Prefer about 1080p to avoid huge 4K files when cookies allow them.
         videos = sorted(
             videos,
             key=lambda item: (
@@ -268,8 +306,11 @@ class BilibiliDownloader(Downloader, ABC):
             ),
         )
         video_id = info.get("id")
-        tmp_video = os.path.join(output_dir, f"{video_id}.video.m4s")
-        video_path = os.path.join(output_dir, f"{video_id}.mp4")
+        return self._download_video_streams(videos, output_dir, video_id, suffix="")
+
+    def _download_video_streams(self, videos: List[dict], output_dir: str, video_id: str, suffix: str = "") -> str:
+        tmp_video = os.path.join(output_dir, f"{video_id}{suffix}.video.m4s")
+        video_path = os.path.join(output_dir, f"{video_id}{suffix}.mp4")
         self._download_stream(videos, tmp_video)
         try:
             self._run_ffmpeg([
@@ -335,31 +376,30 @@ class BilibiliDownloader(Downloader, ABC):
         output_dir: Union[str, None] = None,
     ) -> str:
         """
-        下载视频，返回视频文件路径
+        Download video and return the local video file path.
         """
-
+        self._refresh_cookie()
         if output_dir is None:
             output_dir = get_data_dir()
         os.makedirs(output_dir, exist_ok=True)
-        print("video_url",video_url)
         video_id=extract_video_id(video_url, "bilibili")
         video_path = os.path.join(output_dir, f"{video_id}.mp4")
         if os.path.exists(video_path) and is_screenshot_ready_video(video_path):
             return video_path
         low_quality_cache_path = quarantine_low_quality_video(video_path)
 
-        # 检查是否已经存在
-
+        # Low-resolution caches are quarantined while we try to refresh a clearer source.
+        # If refresh fails, the old cache is restored so note generation can continue.
 
         output_path = os.path.join(output_dir, "%(id)s.%(ext)s")
 
         ydl_opts = {
-            'format': 'bv*[ext=mp4]/bestvideo+bestaudio/best',
+            'format': screenshot_video_format_selector(),
             'outtmpl': output_path,
             'http_headers': {'Referer': 'https://www.bilibili.com'},
             'noplaylist': True,
             'quiet': False,
-            'merge_output_format': 'mp4',  # 确保合并成 mp4
+            'merge_output_format': 'mp4',
         }
         if self._cookiefile:
             ydl_opts['cookiefile'] = self._cookiefile
@@ -370,7 +410,7 @@ class BilibiliDownloader(Downloader, ABC):
                 video_id = info.get("id")
                 video_path = os.path.join(output_dir, f"{video_id}.mp4")
         except Exception:
-            logger.warning("yt-dlp 下载 B 站视频失败，切换到 B 站 API 兜底下载", exc_info=True)
+            logger.warning("yt-dlp failed to download Bilibili video; falling back to Bilibili API", exc_info=True)
             try:
                 video_path = self._download_video_via_api(video_url, output_dir)
             except Exception:
@@ -379,10 +419,20 @@ class BilibiliDownloader(Downloader, ABC):
 
         if not os.path.exists(video_path):
             restore_quarantined_video(low_quality_cache_path, video_path)
-            raise FileNotFoundError(f"视频文件未找到: {video_path}")
+            raise FileNotFoundError(f"Video file not found: {video_path}")
         if not is_screenshot_ready_video(video_path):
-            restore_quarantined_video(low_quality_cache_path, video_path)
-            raise RuntimeError("下载的视频清晰度不足，无法生成清晰截图")
+            api_candidate_path = os.path.join(output_dir, f"{video_id}.api.mp4")
+            try:
+                api_video_path = self._download_video_via_api(video_url, output_dir)
+                if self._is_better_video(api_video_path, video_path):
+                    os.replace(api_video_path, video_path)
+                    logger.info("Bilibili API returned a clearer video; replaced the yt-dlp result")
+                elif api_video_path != video_path and os.path.exists(api_video_path):
+                    os.remove(api_video_path)
+            except Exception as exc:
+                logger.warning("yt-dlp video is source-limited, and Bilibili API fallback also failed: %s", exc)
+            if not is_screenshot_ready_video(video_path):
+                logger.warning("%s; continuing with the current video.", screenshot_quality_failure_message(video_path))
         cleanup_quarantined_video(low_quality_cache_path)
 
         return video_path
@@ -393,29 +443,29 @@ class BilibiliDownloader(Downloader, ABC):
         """
         if os.path.exists(video_path):
             os.remove(video_path)
-            return f"视频文件已删除: {video_path}"
+            return f"Video file deleted: {video_path}"
         else:
-            return f"视频文件未找到: {video_path}"
+            return f"Video file not found: {video_path}"
 
     def download_subtitles(self, video_url: str, output_dir: str = None,
                            langs: List[str] = None) -> Optional[TranscriptResult]:
         """
-        尝试获取B站视频字幕
-
+        Try to fetch Bilibili subtitles.
         :param video_url: 视频链接
         :param output_dir: 输出路径
         :param langs: 优先语言列表
-        :return: TranscriptResult 或 None
+        :return: TranscriptResult or None
         """
-        # 1) 优先走 B 站官方 player API（直拉，无需下视频；AI 字幕需 SESSDATA cookie）
+        self._refresh_cookie()
+        # 1) Prefer the official player API. AI subtitles require SESSDATA cookies.
         try:
             result = BilibiliSubtitleFetcher().fetch_subtitles(video_url)
             if result and result.segments:
                 return result
         except Exception as e:
-            logger.warning(f"player API 直拉字幕异常，回退到 yt-dlp: {e}")
+            logger.warning(f"player API subtitle fetch failed; falling back to yt-dlp: {e}")
 
-        # 2) Fallback：原 yt-dlp 路径（更脆弱，遇到签名/Cookie 问题失败概率较高）
+        # 2) Fallback to yt-dlp, which can be more sensitive to signature/cookie issues.
         if output_dir is None:
             output_dir = get_data_dir()
         if not output_dir:
@@ -437,7 +487,7 @@ class BilibiliDownloader(Downloader, ABC):
             'quiet': True,
         }
 
-        # 通过 CookieConfigManager 注入 B站 Cookie（Netscape cookiefile）
+        # Inject Bilibili cookies through CookieConfigManager as a Netscape cookie file.
         if self._cookiefile:
             ydl_opts['cookiefile'] = self._cookiefile
             ydl_opts['http_headers'] = {'Referer': 'https://www.bilibili.com'}
@@ -446,10 +496,10 @@ class BilibiliDownloader(Downloader, ABC):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)
 
-                # 查找下载的字幕文件
+                # Find downloaded subtitle metadata.
                 subtitles = info.get('requested_subtitles') or {}
                 if not subtitles:
-                    logger.info(f"B站视频 {video_id} 没有可用字幕")
+                    logger.info("Bilibili video %s has no available subtitles", video_id)
                     return None
 
                 # 按优先级查找字幕
@@ -470,12 +520,12 @@ class BilibiliDownloader(Downloader, ABC):
                             break
 
                 if not sub_info:
-                    logger.info(f"B站视频 {video_id} 没有可用字幕（排除弹幕）")
+                    logger.info("Bilibili video %s has no available subtitles after excluding danmaku", video_id)
                     return None
 
-                # 检查是否有内嵌数据（yt-dlp 有时直接返回字幕内容）
+                # yt-dlp can sometimes return subtitle content directly in the metadata.
                 if 'data' in sub_info and sub_info['data']:
-                    logger.info(f"直接从返回数据解析字幕: {detected_lang}")
+                    logger.info("Parsing subtitle data returned directly for language %s", detected_lang)
                     return self._parse_srt_content(sub_info['data'], detected_lang)
 
                 # 查找字幕文件
@@ -483,7 +533,7 @@ class BilibiliDownloader(Downloader, ABC):
                 subtitle_file = os.path.join(output_dir, f"{video_id}.{detected_lang}.{ext}")
 
                 if not os.path.exists(subtitle_file):
-                    logger.info(f"字幕文件不存在: {subtitle_file}")
+                    logger.info("Subtitle file does not exist: %s", subtitle_file)
                     return None
 
                 # 根据格式解析字幕文件
@@ -494,7 +544,7 @@ class BilibiliDownloader(Downloader, ABC):
                         return self._parse_srt_content(f.read(), detected_lang)
 
         except Exception as e:
-            logger.warning(f"获取B站字幕失败: {e}")
+            logger.warning("Failed to fetch Bilibili subtitles: %s", e)
             return None
 
     def _parse_srt_content(self, srt_content: str, language: str) -> Optional[TranscriptResult]:
@@ -518,7 +568,7 @@ class BilibiliDownloader(Downloader, ABC):
                 if not text:
                     continue
 
-                # 转换时间格式 00:00:00,000 -> 秒
+                # Convert SRT time format 00:00:00,000 to seconds.
                 def time_to_seconds(t):
                     parts = t.replace(',', '.').split(':')
                     return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
@@ -533,7 +583,7 @@ class BilibiliDownloader(Downloader, ABC):
                 return None
 
             full_text = ' '.join(seg.text for seg in segments)
-            logger.info(f"成功解析B站SRT字幕，共 {len(segments)} 段")
+            logger.info("Parsed Bilibili SRT subtitles: %d segments", len(segments))
             return TranscriptResult(
                 language=language,
                 full_text=full_text,
@@ -569,7 +619,7 @@ class BilibiliDownloader(Downloader, ABC):
                 segs = event.get('segs', [])
                 text = ''.join(seg.get('utf8', '') for seg in segs).strip()
 
-                if text:  # 只添加非空文本
+                if text:
                     segments.append(TranscriptSegment(
                         start=start_ms / 1000.0,
                         end=(start_ms + duration_ms) / 1000.0,
@@ -581,7 +631,7 @@ class BilibiliDownloader(Downloader, ABC):
 
             full_text = ' '.join(seg.text for seg in segments)
 
-            logger.info(f"成功解析B站字幕，共 {len(segments)} 段")
+            logger.info("Parsed Bilibili subtitles: %d segments", len(segments))
             return TranscriptResult(
                 language=language,
                 full_text=full_text,

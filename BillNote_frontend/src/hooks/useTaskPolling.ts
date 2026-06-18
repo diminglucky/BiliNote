@@ -1,71 +1,105 @@
 import { useEffect, useRef } from 'react'
+import toast from 'react-hot-toast'
+
 import { latestMarkdownContent, useTaskStore } from '@/store/taskStore'
 import { taskApi } from '@/services/taskApi'
 import { isFailedTaskStatus, isRunningTaskStatus, isSuccessTaskStatus } from '@/models/taskStateMachine'
-import toast from 'react-hot-toast'
 
-export const useTaskPolling = (interval = 3000) => {
+type StoreTask = ReturnType<typeof useTaskStore.getState>['tasks'][number]
+
+export const useTaskPolling = (interval = 3000, enabled = true) => {
   const tasks = useTaskStore(state => state.tasks)
+  const currentTaskId = useTaskStore(state => state.currentTaskId)
   const updateTaskContent = useTaskStore(state => state.updateTaskContent)
 
   const tasksRef = useRef(tasks)
+  const currentTaskIdRef = useRef(currentTaskId)
 
-  // 每次 tasks 更新，把最新的 tasks 同步进去
   useEffect(() => {
     tasksRef.current = tasks
   }, [tasks])
 
   useEffect(() => {
-    const timer = setInterval(async () => {
+    currentTaskIdRef.current = currentTaskId
+  }, [currentTaskId])
+
+  useEffect(() => {
+    if (!enabled) return
+
+    const syncTask = async (task: StoreTask) => {
+      try {
+        const res = await taskApi.status(task.id, task.generationToken)
+        const { status, message } = res
+        const latestTask = tasksRef.current.find(item => item.id === task.id)
+        if (!latestTask || latestTask.isRetrySubmitting) return
+        if (latestTask.generationToken && res.generation_token !== latestTask.generationToken) return
+
+        if (!status) return
+
+        const nextGenerationToken = res.generation_token || latestTask.generationToken
+        if (res.result) {
+          const { markdown, transcript, audio_meta } = res.result
+          if (isSuccessTaskStatus(status) && !isSuccessTaskStatus(latestTask.status)) {
+            toast.success('笔记生成成功')
+          }
+          const latestMarkdown = latestMarkdownContent(latestTask.markdown)
+          if (status !== latestTask.status || message !== latestTask.message || markdown !== latestMarkdown) {
+            updateTaskContent(task.id, {
+              status,
+              message,
+              generationToken: nextGenerationToken,
+              markdown,
+              transcript,
+              audioMeta: audio_meta,
+            })
+          }
+          return
+        }
+
+        if (status !== latestTask.status || message !== latestTask.message) {
+          updateTaskContent(task.id, {
+            status,
+            message,
+            generationToken: nextGenerationToken,
+          })
+          if (isFailedTaskStatus(status)) {
+            console.warn(`任务 ${task.id} 失败`)
+          }
+        }
+      } catch (e) {
+        console.error('任务轮询失败：', e)
+      }
+    }
+
+    const pollTasks = async (includeCurrentTask = false) => {
+      const currentId = currentTaskIdRef.current
       const pendingTasks = tasksRef.current.filter(
-        task => isRunningTaskStatus(task.status) && !task.isRetrySubmitting
+        task =>
+          !task.isRetrySubmitting &&
+          (isRunningTaskStatus(task.status) || (task.id === currentId && isFailedTaskStatus(task.status))),
       )
 
-      // 无活跃任务时跳过轮询
-      if (pendingTasks.length === 0) return
-
-      for (const task of pendingTasks) {
-        try {
-          const res = await taskApi.status(task.id, task.generationToken)
-          const { status, message } = res
-          const latestTask = tasksRef.current.find(item => item.id === task.id)
-          if (!latestTask || latestTask.isRetrySubmitting) {
-            continue
-          }
-          if (latestTask.generationToken && res.generation_token !== latestTask.generationToken) {
-            continue
-          }
-
-          if (status) {
-            if (res.result) {
-              const { markdown, transcript, audio_meta } = res.result
-              if (isSuccessTaskStatus(status) && !isSuccessTaskStatus(latestTask.status)) {
-                toast.success('笔记生成成功')
-              }
-              const latestMarkdown = latestMarkdownContent(latestTask.markdown)
-              if (status !== latestTask.status || message !== latestTask.message || markdown !== latestMarkdown) {
-                updateTaskContent(task.id, {
-                  status,
-                  message,
-                  generationToken: res.generation_token || latestTask.generationToken,
-                  markdown,
-                  transcript,
-                  audioMeta: audio_meta,
-                })
-              }
-            } else if (isFailedTaskStatus(status) && (status !== latestTask.status || message !== latestTask.message)) {
-              updateTaskContent(task.id, { status, message })
-              console.warn(`任务 ${task.id} 失败`)
-            } else if (status !== latestTask.status || message !== latestTask.message) {
-              updateTaskContent(task.id, { status, message })
-            }
-          }
-        } catch (e) {
-          console.error('❌ 任务轮询失败：', e)
+      if (includeCurrentTask && currentId) {
+        const currentTask = tasksRef.current.find(task => task.id === currentId)
+        if (
+          currentTask &&
+          !currentTask.isRetrySubmitting &&
+          !pendingTasks.some(task => task.id === currentTask.id)
+        ) {
+          pendingTasks.push(currentTask)
         }
       }
+
+      for (const task of pendingTasks) {
+        await syncTask(task)
+      }
+    }
+
+    void pollTasks(true)
+    const timer = setInterval(() => {
+      void pollTasks(false)
     }, interval)
 
     return () => clearInterval(timer)
-  }, [interval])
+  }, [enabled, interval, currentTaskId, updateTaskContent])
 }

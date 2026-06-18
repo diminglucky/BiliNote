@@ -64,6 +64,139 @@ const normalizeBrokenImageSyntax = (markdown: string) =>
     .replace(/^\s*!\[\]\((images\/[^)\r\n]+)\)\s*$/gm, '![]($1)')
     .replace(/!\[([^\]]*)\]\(([^)\r\n]+)\)(?=!\[)/g, '![$1]($2)\n\n')
 
+const tocHeadingPattern = /^(#{1,3})\s*目录\s*$/
+const markdownHeadingPattern = /^(#{1,6})\s+(.+?)\s*$/
+const fencedBlockPattern = /^\s*(```|~~~)/
+
+const stripMarkdownForText = (value: string) =>
+  value
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/`([^`]*)`/g, '$1')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\\/g, '')
+    .trim()
+
+const normalizeContentMarkerText = (value: string) =>
+  value.replace(/\*?Content-\[((?:\d{2}:)?\d{2}:\d{2})\]\*?/g, '*Content-[$1]*')
+
+const cleanHeadingTitle = (rawTitle: string) => normalizeContentMarkerText(stripMarkdownForText(rawTitle))
+
+const isSummaryHeading = (title: string) => {
+  const compact = title.replace(/\s+/g, '')
+  return compact === 'AI总结' || compact === '总结' || compact.startsWith('AI总结')
+}
+
+const githubStyleAnchor = (title: string, used: Map<string, number>) => {
+  const base = stripMarkdownForText(title)
+    .toLowerCase()
+    .replace(/[\*_~`]/g, '')
+    .replace(/[!"#$%&'()*+,./:;<=>?@\[\\\]^`{|}，。！？、；：“”‘’（）【】《》]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-{3,}/g, '--')
+    .trim() || 'section'
+  const count = used.get(base) || 0
+  used.set(base, count + 1)
+  return count > 0 ? `${base}-${count}` : base
+}
+
+const extractMarkdownTocHeadings = (markdown: string) => {
+  const headings: string[] = []
+  let inFence = false
+  for (const line of markdown.split(/\r?\n/)) {
+    if (fencedBlockPattern.test(line)) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence) continue
+    const match = line.match(markdownHeadingPattern)
+    if (!match || match[1].length !== 2) continue
+    const title = cleanHeadingTitle(match[2])
+    if (!title || title === '目录' || isSummaryHeading(title) || title.includes('原片截图')) continue
+    headings.push(title)
+  }
+  return headings
+}
+
+const findTocBlock = (lines: string[]) => {
+  let inFence = false
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    if (fencedBlockPattern.test(line)) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence || !tocHeadingPattern.test(line.trim())) continue
+
+    let end = index + 1
+    while (end < lines.length) {
+      const nextLine = lines[end]
+      if (markdownHeadingPattern.test(nextLine) && !tocHeadingPattern.test(nextLine.trim())) break
+      end += 1
+    }
+    while (end > index + 1 && ['', '---', '***', '___'].includes(lines[end - 1].trim())) {
+      end -= 1
+    }
+    return [index, end] as const
+  }
+  return null
+}
+
+const tocInsertIndex = (lines: string[]) => {
+  let inFence = false
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    if (fencedBlockPattern.test(line)) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence) continue
+    const match = line.match(markdownHeadingPattern)
+    if (match && match[1].length === 2) return index
+  }
+  return 0
+}
+
+const normalizeMarkdownToc = (markdown: string, ensureToc = false) => {
+  const headings = extractMarkdownTocHeadings(markdown)
+  if (!headings.length) return markdown
+
+  const lines = markdown.split(/\r?\n/)
+  const tocBlock = findTocBlock(lines)
+  if (!tocBlock && !ensureToc) return markdown
+  const used = new Map<string, number>()
+  const tocLines = [
+    '## 目录',
+    '',
+    ...headings.map(title => `- [${title}](#${githubStyleAnchor(title, used)})`),
+    '',
+  ]
+
+  if (tocBlock) {
+    const [start, end] = tocBlock
+    return [...lines.slice(0, start), ...tocLines, ...lines.slice(end)].join('\n').trimEnd() + '\n'
+  }
+
+  const insertAt = tocInsertIndex(lines)
+  return [...lines.slice(0, insertAt), ...tocLines, ...lines.slice(insertAt)].join('\n').trimEnd() + '\n'
+}
+
+const normalizeNestedTocOriginLinks = (markdown: string) =>
+  markdown
+    .replace(
+      /^(\s*[-*+]\s*)\[([^\]\n]+?)\s+\[原片 @ (\d{2}:\d{2})\]\((https?:\/\/[^)\s]+)\)\*?\]\((#[^)]+)\)/gm,
+      (_match, prefix: string, title: string, time: string, _url: string, anchor: string) =>
+        `${prefix}[${title.trim()} *Content-[${time}]*](${anchor})`,
+    )
+    .replace(
+      /^(\s*[-*+]\s*)\[([^\]\n]+?)\]\((#[^)]+)\)\s+[·路]\s+\[原片 @ (\d{2}:\d{2})\]\((https?:\/\/[^)\s]+)\)/gm,
+      (_match, prefix: string, title: string, anchor: string, time: string) =>
+        `${prefix}[${title.trim()} *Content-[${time}]*](${anchor})`,
+    )
+
+const normalizeMarkdownForDisplay = (markdown: string) =>
+  normalizeNestedTocOriginLinks(normalizeMarkdownToc(normalizeBrokenImageSyntax(markdown)))
+
 const dataUriToBlob = (dataUri: string) => {
   const match = dataUri.match(/^data:([^;,]+)?(;base64)?,(.*)$/)
   if (!match) return null
@@ -422,6 +555,10 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     () => currentTask?.markdown || [],
     [currentTask?.markdown],
   )
+  const displayContent = useMemo(
+    () => normalizeMarkdownForDisplay(selectedContent),
+    [selectedContent],
+  )
   const currentFormData = currentTask?.formData
   const currentCreatedAt = currentTask?.createdAt
   const [showTranscribe, setShowTranscribe] = useState(false)
@@ -464,7 +601,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   }, [currentTask, currentVerId, markdownVersions, currentFormData, currentCreatedAt])
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(selectedContent)
+      await navigator.clipboard.writeText(normalizeMarkdownForDisplay(selectedContent))
       toast.success('已复制到剪贴板')
     } catch (e) {
       toast.error('复制失败')
@@ -474,7 +611,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     const task = getCurrentTask()
     const name = sanitizeFileName(task?.audioMeta.title || 'note')
     const images: Array<{ src: string; alt: string }> = []
-    const normalizedContent = normalizeBrokenImageSyntax(selectedContent)
+    const normalizedContent = normalizeMarkdownForDisplay(selectedContent)
 
     const markdownWithPlaceholders = normalizedContent.replace(
       markdownImagePattern,
@@ -689,6 +826,27 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                         <StepBar steps={taskSteps} currentStep={taskStatus} compact />
                       </div>
                     )}
+                    {status === 'failed' && markdownVersions.length > 0 && (
+                      <div className="sticky top-0 z-10 border-b border-red-200 bg-red-50/95 px-5 py-3 text-red-800 shadow-sm backdrop-blur">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-medium">重新生成失败，当前显示的是上一个可用版本</div>
+                            <div className="mt-1 text-xs leading-5 text-red-700">
+                              {taskMessage || '请检查后端日志或调整生成配置后再重试。'}
+                            </div>
+                          </div>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-8 border-red-200 bg-white text-red-700 hover:bg-red-100"
+                            onClick={() => currentTask && retryTask(currentTask.id)}
+                          >
+                            重试
+                          </Button>
+                        </div>
+                      </div>
+                    )}
                     <div className="px-5 pt-5">
                       <VideoBanner
                         audioMeta={currentTask?.audioMeta}
@@ -701,7 +859,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                         rehypePlugins={rehypePlugins}
                         components={markdownComponents}
                       >
-                        {selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, '')}
+                        {displayContent.replace(/^>\s*来源链接：[^\n]*\n*/m, '')}
                       </ReactMarkdown>
                     </div>
                   </ScrollArea>
