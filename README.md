@@ -1,6 +1,6 @@
 # VideoNote
 
-> Current version: `0.2.3`
+> Current version: `0.2.4`
 >
 > License notice: VideoNote is provided only for personal study, research, evaluation, and other non-commercial use. Any form of commercialization is prohibited unless explicitly authorized in writing by the author.
 
