@@ -197,6 +197,7 @@ class NoteGenerator:
                 note_writer_agent=self.note_writer_agent,
                 markdown_composer_agent=self.markdown_composer_agent,
                 chat_rag_agent=ChatRagAgent(),
+                status_updater=self._update_status,
             )
             runtime_context = executor.run(self.execution_plan, runtime_context)
             markdown = prepend_source_link(runtime_context.markdown or "", str(video_url))

@@ -1,15 +1,34 @@
 import json
 import pathlib
+import shutil
 import sys
-import tempfile
 import time
 import unittest
+import uuid
 from unittest.mock import patch
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+TEST_TMP_ROOT = ROOT / ".test_tmp"
+
+
+class ProjectTempDir:
+    def __init__(self, prefix="router_cache_"):
+        self.prefix = prefix
+        self.path: pathlib.Path | None = None
+
+    def __enter__(self):
+        TEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+        self.path = TEST_TMP_ROOT / f"{self.prefix}{uuid.uuid4().hex}"
+        self.path.mkdir()
+        return str(self.path)
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        if self.path is not None:
+            shutil.rmtree(self.path, ignore_errors=True)
 
 
 from app.enmus.task_status_enums import TaskStatus
@@ -47,7 +66,7 @@ class TestNoteRouterCacheRecovery(unittest.TestCase):
         )
 
     def test_recover_result_from_cache_does_not_override_active_enhancement(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             output_dir = pathlib.Path(tmp_dir)
             task_id = "task-1"
             status_path = output_dir / f"{task_id}.status.json"
@@ -74,7 +93,7 @@ class TestNoteRouterCacheRecovery(unittest.TestCase):
             self.assertEqual(status["generation_token"], "generation-1")
 
     def test_recover_result_from_cache_preserves_generation_token_for_stale_failure(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             output_dir = pathlib.Path(tmp_dir)
             task_id = "task-1"
             status_path = output_dir / f"{task_id}.status.json"
@@ -102,7 +121,7 @@ class TestNoteRouterCacheRecovery(unittest.TestCase):
             self.assertEqual(status["generation_token"], "generation-1")
 
     def test_retry_generation_clears_stale_result_but_keeps_media_caches(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             output_dir = pathlib.Path(tmp_dir)
             task_id = "task-1"
             status_path = output_dir / f"{task_id}.status.json"
@@ -148,7 +167,7 @@ class TestNoteRouterCacheRecovery(unittest.TestCase):
             self.assertTrue(audio_path.exists())
 
     def test_retry_generation_allows_missing_transcriber_model_when_transcript_cache_exists(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             output_dir = pathlib.Path(tmp_dir)
             task_id = "task-1"
             transcript_path = output_dir / f"{task_id}_transcript.json"
@@ -193,7 +212,7 @@ class TestNoteRouterCacheRecovery(unittest.TestCase):
             self.assertEqual(payload["data"]["task_id"], task_id)
 
     def test_status_with_new_generation_token_does_not_return_old_result(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             output_dir = pathlib.Path(tmp_dir)
             task_id = "task-1"
             status_path = output_dir / f"{task_id}.status.json"
@@ -231,7 +250,7 @@ class TestNoteRouterCacheRecovery(unittest.TestCase):
             self.assertNotIn("result", data)
 
     def test_recover_existing_result_without_markdown_must_match_generation_token(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             output_dir = pathlib.Path(tmp_dir)
             task_id = "task-1"
             result_path = output_dir / f"{task_id}.json"
@@ -263,7 +282,7 @@ class TestNoteRouterCacheRecovery(unittest.TestCase):
                 )
 
     def test_success_status_with_new_generation_token_does_not_return_old_result(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             output_dir = pathlib.Path(tmp_dir)
             task_id = "task-1"
             status_path = output_dir / f"{task_id}.status.json"
@@ -300,8 +319,48 @@ class TestNoteRouterCacheRecovery(unittest.TestCase):
             self.assertEqual(data["generation_token"], "new-token")
             self.assertNotIn("result", data)
 
+    def test_partial_success_status_returns_result_with_warning_status(self):
+        with ProjectTempDir() as tmp_dir:
+            output_dir = pathlib.Path(tmp_dir)
+            task_id = "task-1"
+            status_path = output_dir / f"{task_id}.status.json"
+            result_path = output_dir / f"{task_id}.json"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "markdown": "## note without complete screenshots\n",
+                        "transcript": {},
+                        "audio_meta": {},
+                        "generation_token": "generation-1",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "status": TaskStatus.PARTIAL_SUCCESS.value,
+                        "message": "正文已生成，但截图增强没有完全完成",
+                        "generation_token": "generation-1",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(note_router, "NOTE_OUTPUT_DIR", str(output_dir)):
+                response = note_router.get_task_status(task_id, generation_token="generation-1")
+
+            body = json.loads(response.body.decode("utf-8"))
+            data = body["data"]
+            self.assertEqual(data["status"], TaskStatus.PARTIAL_SUCCESS.value)
+            self.assertEqual(data["result"]["markdown"], "## note without complete screenshots\n")
+            self.assertEqual(data["message"], "正文已生成，但截图增强没有完全完成")
+            self.assertEqual(data["generation_token"], "generation-1")
+
     def test_newer_markdown_cache_replaces_stale_success_result(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             output_dir = pathlib.Path(tmp_dir)
             task_id = "task-1"
             result_path = output_dir / f"{task_id}.json"

@@ -23,10 +23,15 @@ NOTE_WRITER_AGENT = AgentSpec(
     name="NoteWriterAgent",
     description="Generate the base Markdown note from transcript and metadata.",
 )
+VISUAL_INVENTORY_AGENT = AgentSpec(
+    role=AgentRole.VISUAL_INVENTORY,
+    name="VisualInventoryAgent",
+    description="Scan the video for useful visual states before document placement.",
+)
 VISUAL_PLANNER_AGENT = AgentSpec(
     role=AgentRole.VISUAL_PLANNER,
     name="VisualPlannerAgent",
-    description="Plan useful screenshot positions from the generated Markdown.",
+    description="Plan useful screenshot positions from Markdown plus video inventory.",
 )
 FRAME_SELECTOR_AGENT = AgentSpec(
     role=AgentRole.FRAME_SELECTOR,
@@ -105,12 +110,20 @@ def build_note_execution_plan(context: AgentExecutionContext) -> ExecutionPlan:
         steps.extend(
             [
                 AgentStep(
-                    step_id="plan_visuals",
-                    agent=VISUAL_PLANNER_AGENT,
+                    step_id="build_visual_inventory",
+                    agent=VISUAL_INVENTORY_AGENT,
                     mode=visual_mode,
                     depends_on=("write_markdown",),
                     optional=True,
-                    reason="Plan screenshot slots from the generated Markdown.",
+                    reason="Scan the video for useful visual states before screenshot placement.",
+                ),
+                AgentStep(
+                    step_id="plan_visuals",
+                    agent=VISUAL_PLANNER_AGENT,
+                    mode=visual_mode,
+                    depends_on=("build_visual_inventory",),
+                    optional=True,
+                    reason="Plan screenshot slots from the generated Markdown and video inventory.",
                 ),
                 AgentStep(
                     step_id="select_frames",

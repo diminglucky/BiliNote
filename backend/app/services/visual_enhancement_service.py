@@ -29,6 +29,7 @@ class VisualEnhancementService:
         self.note_output_dir = Path(note_output_dir)
         self.status_writer = status_writer
         self.screenshot_agent_factory = screenshot_agent_factory
+        self._last_screenshot_summary: dict[str, Any] = {}
 
     def _insert_screenshots(
         self,
@@ -37,8 +38,10 @@ class VisualEnhancementService:
         duration: Optional[float],
         gpt: Any,
         on_markdown_update: Callable[[str, int, str], None],
+        on_stage_update: Optional[Callable[[str], None]] = None,
         transcript_segments: Optional[list[Any]] = None,
     ) -> str | None:
+        self._last_screenshot_summary = {}
         if self.screenshot_agent_factory:
             agent = self.screenshot_agent_factory()
         else:
@@ -54,24 +57,43 @@ class VisualEnhancementService:
             )
 
         try:
-            return agent.insert_screenshots(
+            result = agent.insert_screenshots(
                 markdown,
                 video_path,
                 duration,
                 gpt,
                 on_markdown_update=on_markdown_update,
                 transcript_segments=transcript_segments,
+                on_stage_update=on_stage_update,
             )
+            self._capture_screenshot_summary(agent)
+            return result
         except TypeError as exc:
-            if "transcript_segments" not in str(exc):
+            if "transcript_segments" not in str(exc) and "on_stage_update" not in str(exc):
                 raise
-            return agent.insert_screenshots(
-                markdown,
-                video_path,
-                duration,
-                gpt,
-                on_markdown_update=on_markdown_update,
-            )
+            try:
+                result = agent.insert_screenshots(
+                    markdown,
+                    video_path,
+                    duration,
+                    gpt,
+                    on_markdown_update=on_markdown_update,
+                    transcript_segments=transcript_segments,
+                )
+                self._capture_screenshot_summary(agent)
+                return result
+            except TypeError as retry_exc:
+                if "transcript_segments" not in str(retry_exc):
+                    raise
+                result = agent.insert_screenshots(
+                    markdown,
+                    video_path,
+                    duration,
+                    gpt,
+                    on_markdown_update=on_markdown_update,
+                )
+                self._capture_screenshot_summary(agent)
+                return result
 
     def enhance_saved_note(
         self,
@@ -120,6 +142,7 @@ class VisualEnhancementService:
                 inserted_count += 1
                 latest_payload["markdown"] = normalize_markdown_toc(markdown_snapshot) or markdown_snapshot
                 self._atomic_write_json(result_path, latest_payload)
+                self._write_markdown_cache(task_id, latest_payload["markdown"])
                 self._update_status_if_current(
                     result_path,
                     enhance_token,
@@ -131,14 +154,32 @@ class VisualEnhancementService:
                     message=f"正在增强截图：已插入 {inserted_count} 张关键截图（最近 {int(timestamp)} 秒）",
                 )
 
+            def _publish_stage(message: str) -> None:
+                latest_payload = self._load_result(result_path)
+                if not self._matches_token(latest_payload, enhance_token, generation_token):
+                    logger.info("Skip stale visual enhancement stage update (task_id=%s)", task_id)
+                    return
+                self._update_status_if_current(
+                    result_path,
+                    enhance_token,
+                    generation_token,
+                    self.note_output_dir,
+                    self.status_writer,
+                    task_id,
+                    "ENHANCING",
+                    message=message,
+                )
+
             enhanced = self._insert_screenshots(
                 markdown=markdown,
                 video_path=Path(video_path),
                 duration=audio_meta.duration,
                 gpt=gpt,
                 on_markdown_update=_publish_increment,
+                on_stage_update=_publish_stage,
                 transcript_segments=transcript_segments,
             )
+            screenshot_summary = self._last_screenshot_summary
 
             latest_payload = self._load_result(result_path)
             if not self._matches_token(latest_payload, enhance_token, generation_token):
@@ -148,6 +189,10 @@ class VisualEnhancementService:
             latest_markdown = latest_payload.get("markdown") or ""
             if inserted_count > 0 and latest_markdown != markdown and (not enhanced or enhanced == markdown):
                 self._reindex_task(task_id)
+                final_status, final_message = self._completion_status(
+                    screenshot_summary,
+                    inserted_count,
+                )
                 self._update_status_if_current(
                     result_path,
                     enhance_token,
@@ -155,17 +200,20 @@ class VisualEnhancementService:
                     self.note_output_dir,
                     self.status_writer,
                     task_id,
-                    "SUCCESS",
-                    message="Note is ready; key screenshots have been enhanced",
+                    final_status,
+                    message=final_message,
                 )
                 return True
 
             if not enhanced or enhanced == markdown:
                 inserted_after = (enhanced or markdown).count("![](") - markdown.count("![](")
-                status_message = (
-                    "Note is ready; no additional key screenshot was needed"
+                final_status, status_message = (
+                    self._completion_status(screenshot_summary, inserted_after)
                     if inserted_after > 0
-                    else "Note is ready, but screenshot enhancement did not find a usable image"
+                    else (
+                        "PARTIAL_SUCCESS",
+                        "Note is ready, but screenshot enhancement did not find a usable image",
+                    )
                 )
                 self._update_status_if_current(
                     result_path,
@@ -174,14 +222,20 @@ class VisualEnhancementService:
                     self.note_output_dir,
                     self.status_writer,
                     task_id,
-                    "SUCCESS",
+                    final_status,
                     message=status_message,
                 )
                 return False
 
             latest_payload["markdown"] = normalize_markdown_toc(enhanced) or enhanced
             self._atomic_write_json(result_path, latest_payload)
+            self._write_markdown_cache(task_id, latest_payload["markdown"])
             self._reindex_task(task_id)
+            inserted_after = enhanced.count("![](") - markdown.count("![](")
+            final_status, final_message = self._completion_status(
+                screenshot_summary,
+                inserted_after,
+            )
             self._update_status_if_current(
                 result_path,
                 enhance_token,
@@ -189,8 +243,8 @@ class VisualEnhancementService:
                 self.note_output_dir,
                 self.status_writer,
                 task_id,
-                "SUCCESS",
-                message="Note is ready; key screenshots have been enhanced",
+                final_status,
+                message=final_message,
             )
             return True
         except Exception as exc:
@@ -211,10 +265,44 @@ class VisualEnhancementService:
                 self.note_output_dir,
                 self.status_writer,
                 task_id,
-                "SUCCESS",
+                "PARTIAL_SUCCESS",
                 message=f"Note is ready; screenshot enhancement failed: {exc}",
             )
             return False
+
+    def _capture_screenshot_summary(self, agent: Any) -> None:
+        summary = getattr(agent, "last_run_summary", None)
+        if isinstance(summary, dict):
+            self._last_screenshot_summary = summary
+            return
+
+        state = getattr(agent, "last_run_state", None)
+        if state is not None:
+            self._last_screenshot_summary = {
+                "planned_slots": int(getattr(state, "planned_slot_count", 0) or 0),
+                "successful_slots": int(getattr(state, "successful_slot_count", 0) or 0),
+                "failed_slots": int(getattr(state, "failed_slot_count", 0) or 0),
+                "duplicate_slots": int(getattr(state, "duplicate_slot_count", 0) or 0),
+                "diagnostics": list(getattr(state, "diagnostics", None) or []),
+            }
+
+    @staticmethod
+    def _completion_status(summary: dict[str, Any], inserted_count: int) -> tuple[str, str]:
+        planned = int(summary.get("planned_slots") or 0)
+        successful = int(summary.get("successful_slots") or inserted_count or 0)
+        failed = int(summary.get("failed_slots") or 0)
+        duplicate = int(summary.get("duplicate_slots") or 0)
+        unresolved = max(0, planned - successful - duplicate)
+        if failed > 0 or unresolved > 0:
+            return (
+                "PARTIAL_SUCCESS",
+                (
+                    "Note is ready; inserted "
+                    f"{max(inserted_count, successful)} key screenshot(s), "
+                    f"but {failed + unresolved} planned screenshot slot(s) could not be completed"
+                ),
+            )
+        return "SUCCESS", "Note is ready; key screenshots have been enhanced"
 
     @staticmethod
     def _matches_token(
@@ -298,6 +386,11 @@ class VisualEnhancementService:
             f.flush()
             temp_path = Path(f.name)
         temp_path.replace(path)
+
+    def _write_markdown_cache(self, task_id: str, markdown: str) -> None:
+        cache_path = self.note_output_dir / f"{task_id}_markdown.md"
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(markdown or "", encoding="utf-8")
 
     @classmethod
     def _has_current_token(

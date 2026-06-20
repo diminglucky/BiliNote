@@ -1,13 +1,37 @@
 import json
 import pathlib
-import tempfile
+import shutil
+import sys
 import unittest
+import uuid
 
 from PIL import Image, ImageDraw, ImageFilter
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from app.benchmark.note_quality import load_task_report
 from app.enmus.task_status_enums import TaskStatus
 from app.utils.task_status_writer import write_status_record
+
+TEST_TMP_ROOT = ROOT / ".test_tmp"
+
+
+class ProjectTempDir:
+    def __init__(self, prefix="quality_benchmark_"):
+        self.prefix = prefix
+        self.path: pathlib.Path | None = None
+
+    def __enter__(self):
+        TEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+        self.path = TEST_TMP_ROOT / f"{self.prefix}{uuid.uuid4().hex}"
+        self.path.mkdir()
+        return str(self.path)
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        if self.path is not None:
+            shutil.rmtree(self.path, ignore_errors=True)
 
 
 class TestNoteQualityBenchmark(unittest.TestCase):
@@ -40,7 +64,7 @@ class TestNoteQualityBenchmark(unittest.TestCase):
         )
 
     def test_report_detects_duplicate_low_quality_and_unresolved_markers(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             root = pathlib.Path(tmp_dir)
             note_dir = root / "note_results"
             static_dir = root / "static"
@@ -104,7 +128,7 @@ class TestNoteQualityBenchmark(unittest.TestCase):
         self.assertFalse(report.pass_quality_gate)
 
     def test_status_writer_preserves_history_for_stage_timing(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             note_dir = pathlib.Path(tmp_dir)
             write_status_record(
                 "task-1",
@@ -125,6 +149,155 @@ class TestNoteQualityBenchmark(unittest.TestCase):
         self.assertEqual(payload["generation_token"], "generation-1")
         self.assertEqual([item["status"] for item in payload["history"]], ["PENDING", "DOWNLOADING"])
         self.assertEqual(payload["history"][-1]["message"], "download started")
+
+    def test_partial_success_is_not_quality_gate_pass(self):
+        with ProjectTempDir() as tmp_dir:
+            root = pathlib.Path(tmp_dir)
+            note_dir = root / "note_results"
+            static_dir = root / "static"
+            note_dir.mkdir()
+            static_dir.mkdir()
+            markdown = (
+                "## Demo Section *Content-[00:00]*\n\n"
+                "This is a complete enough note body with summary signal and enough context "
+                "to isolate partial success as the only issue.\n\n"
+                "## AI Summary\n\n"
+                "Summary text.\n"
+            )
+            self._write_task_payload(note_dir, "task-1", markdown)
+            write_status_record(
+                "task-1",
+                TaskStatus.PARTIAL_SUCCESS,
+                message="正文已生成，但截图增强没有完全完成",
+                generation_token="generation-1",
+                output_dir=note_dir,
+            )
+
+            report = load_task_report("task-1", note_dir, static_dir)
+
+        self.assertEqual(report.status, TaskStatus.PARTIAL_SUCCESS.value)
+        self.assertTrue(any(issue.startswith("partial-success") for issue in report.issues))
+        self.assertFalse(report.pass_quality_gate)
+
+    def test_report_detects_clustered_images_without_markdown_context(self):
+        with ProjectTempDir() as tmp_dir:
+            root = pathlib.Path(tmp_dir)
+            note_dir = root / "note_results"
+            static_dir = root / "static"
+            screenshot_dir = static_dir / "screenshots"
+            note_dir.mkdir()
+            screenshot_dir.mkdir(parents=True)
+
+            for filename, color in [
+                ("first.jpg", "white"),
+                ("second.jpg", "lightgray"),
+                ("third.jpg", "white"),
+                ("fourth.jpg", "lightgray"),
+            ]:
+                img = Image.new("RGB", (1280, 720), color)
+                draw = ImageDraw.Draw(img)
+                for row in range(10):
+                    draw.text((90, 70 + row * 60), f"Useful screen detail {row}", fill="black")
+                img.save(screenshot_dir / filename, quality=95)
+
+            markdown = (
+                "## Demo Section *Content-[00:00]*\n\n"
+                "This section has enough explanation before images, but the following two "
+                "screenshots are stacked without separate prose, which makes the note hard "
+                "to read and should be caught by the quality benchmark.\n\n"
+                "![](/static/screenshots/first.jpg)\n\n"
+                "![](/static/screenshots/second.jpg)\n\n"
+                "![](/static/screenshots/third.jpg)\n\n"
+                "### Separate result screen\n\n"
+                "![](/static/screenshots/fourth.jpg)\n\n"
+                "## AI Summary\n\n"
+                "Summary text with enough words to avoid unrelated markdown length failures.\n"
+            )
+            self._write_task_payload(note_dir, "task-1", markdown)
+            write_status_record(
+                "task-1",
+                TaskStatus.SUCCESS,
+                generation_token="generation-1",
+                output_dir=note_dir,
+            )
+
+            report = load_task_report("task-1", note_dir, static_dir)
+
+        cluster_issues = [
+            issue for issue in report.issues
+            if issue.endswith(":image-cluster")
+        ]
+        self.assertGreaterEqual(len(cluster_issues), 2)
+        by_name = {pathlib.Path(item.path or item.url).name: item for item in report.images}
+        self.assertNotIn("image-cluster", by_name["fourth.jpg"].issues)
+        self.assertFalse(report.pass_quality_gate)
+
+    def test_source_limited_video_does_not_fail_only_for_low_resolution_images(self):
+        with ProjectTempDir() as tmp_dir:
+            root = pathlib.Path(tmp_dir)
+            note_dir = root / "note_results"
+            static_dir = root / "static"
+            screenshot_dir = static_dir / "screenshots"
+            note_dir.mkdir()
+            screenshot_dir.mkdir(parents=True)
+
+            image_path = screenshot_dir / "source_480p.jpg"
+            img = Image.new("RGB", (852, 480), (248, 250, 252))
+            draw = ImageDraw.Draw(img)
+            draw.rectangle((0, 0, 852, 48), fill=(20, 30, 45))
+            draw.rectangle((28, 76, 380, 430), outline=(37, 99, 235), width=3)
+            draw.rectangle((410, 76, 824, 430), outline=(22, 163, 74), width=3)
+            for row in range(9):
+                y = 96 + row * 34
+                draw.rectangle((48, y, 350, y + 14), fill=(30 + row * 12, 90, 180))
+                draw.line((430, y + 8, 790, y + 8), fill=(15, 23, 42), width=2)
+                draw.text((436, y + 14), f"Result row {row}", fill=(15, 23, 42))
+            for col in range(5):
+                x = 60 + col * 62
+                draw.ellipse((x, 380, x + 26, 406), fill=(234, 88, 12))
+            img.save(image_path, quality=95)
+
+            markdown = (
+                "## Demo Section *Content-[00:00]*\n\n"
+                "This section has enough useful explanation before the image so the placement "
+                "is not considered thin by the quality benchmark. It describes the visible "
+                "interface, the final output area, the comparison table, and why the screenshot "
+                "should still be accepted when the original video source is only 480p. The note "
+                "body intentionally contains enough prose to pass the normal markdown length "
+                "gate, because this test isolates source-limited screenshot resolution instead "
+                "of relaxing the rest of the quality benchmark.\n\n"
+                "![](/static/screenshots/source_480p.jpg)\n\n"
+                "## AI Summary\n\n"
+                "Summary text. This generated note remains useful because the source-limited "
+                "image is clear enough for the original video quality, and no screenshot slot "
+                "was missing, duplicated, or placed without surrounding context.\n"
+            )
+            self._write_task_payload(note_dir, "task-1", markdown)
+            payload_path = note_dir / "task-1.json"
+            payload = json.loads(payload_path.read_text(encoding="utf-8"))
+            payload["audio_meta"]["raw_info"] = {
+                "video_quality": {
+                    "resolution": "852x480",
+                    "width": 852,
+                    "height": 480,
+                    "screenshot_ready": False,
+                    "degraded": True,
+                }
+            }
+            payload_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            write_status_record(
+                "task-1",
+                TaskStatus.SUCCESS,
+                generation_token="generation-1",
+                output_dir=note_dir,
+            )
+
+            report = load_task_report("task-1", note_dir, static_dir)
+
+        self.assertTrue(report.source_limited_screenshots)
+        self.assertEqual(report.low_quality_image_count, 0)
+        self.assertFalse(any("low-resolution" in issue for issue in report.issues))
+        self.assertTrue(report.pass_quality_gate)
 
 
 if __name__ == "__main__":

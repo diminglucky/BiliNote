@@ -8,6 +8,7 @@ class AgentRole(str, Enum):
     DOWNLOAD = "download"
     TRANSCRIPT = "transcript"
     NOTE_WRITER = "note_writer"
+    VISUAL_INVENTORY = "visual_inventory"
     VISUAL_PLANNER = "visual_planner"
     FRAME_SELECTOR = "frame_selector"
     VISION_REVIEW = "vision_review"

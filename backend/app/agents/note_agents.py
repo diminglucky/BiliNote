@@ -579,7 +579,7 @@ class VisualEnhancementAgent:
                 request.task_id,
                 request.enhance_token,
                 request.generation_token,
-                TaskStatus.SUCCESS,
+                TaskStatus.PARTIAL_SUCCESS,
                 "Note is ready, but video file is missing so screenshots cannot be enhanced.",
             )
             return None
@@ -595,7 +595,7 @@ class VisualEnhancementAgent:
                 request.task_id,
                 request.enhance_token,
                 request.generation_token,
-                TaskStatus.SUCCESS,
+                TaskStatus.PARTIAL_SUCCESS,
                 "Note is ready, but video file does not exist so screenshots cannot be enhanced.",
             )
             return None
@@ -626,7 +626,7 @@ class VisualEnhancementAgent:
                 request.task_id,
                 request.enhance_token,
                 request.generation_token,
-                TaskStatus.SUCCESS,
+                TaskStatus.PARTIAL_SUCCESS,
                 f"Note is ready, but screenshot enhancement could not be submitted: {exc}",
             )
             return None
@@ -643,7 +643,7 @@ class VisualEnhancementAgent:
                     request.task_id,
                     request.enhance_token,
                     request.generation_token,
-                    TaskStatus.SUCCESS,
+                    TaskStatus.PARTIAL_SUCCESS,
                     f"Note is ready, but screenshot enhancement failed: {exc}",
                 )
 

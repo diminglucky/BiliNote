@@ -1,14 +1,32 @@
 import importlib.util
 import pathlib
+import shutil
 import sys
-import tempfile
 import types
 import unittest
+import uuid
 
 from PIL import Image, ImageDraw, ImageFilter
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+TEST_TMP_ROOT = ROOT / ".test_tmp"
+
+
+class ProjectTempDir:
+    def __init__(self, prefix="video_reader_"):
+        self.prefix = prefix
+        self.path: pathlib.Path | None = None
+
+    def __enter__(self):
+        TEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+        self.path = TEST_TMP_ROOT / f"{self.prefix}{uuid.uuid4().hex}"
+        self.path.mkdir()
+        return str(self.path)
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        if self.path is not None:
+            shutil.rmtree(self.path, ignore_errors=True)
 
 
 def _load_video_reader_module():
@@ -49,7 +67,7 @@ VideoReader = video_reader_module.VideoReader
 
 class TestVideoReaderQuality(unittest.TestCase):
     def test_score_frame_penalizes_blurry_text_frame(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             clear_path = pathlib.Path(tmp_dir) / "clear.jpg"
             blurry_path = pathlib.Path(tmp_dir) / "blurry.jpg"
 
@@ -66,6 +84,25 @@ class TestVideoReaderQuality(unittest.TestCase):
 
         self.assertGreater(clear_score, blurry_score)
         self.assertLess(blurry_score, 0.42)
+
+    def test_same_visual_state_matches_quality_benchmark_threshold(self):
+        left = video_reader_module.FrameCandidate(
+            path="left.jpg",
+            timestamp=10,
+            score=0.8,
+            exact_hash="left",
+            perceptual_hash=0b0000,
+        )
+        right = video_reader_module.FrameCandidate(
+            path="right.jpg",
+            timestamp=20,
+            score=0.8,
+            exact_hash="right",
+            perceptual_hash=0b0111,
+        )
+        reader = VideoReader(video_path="dummy.mp4")
+
+        self.assertTrue(reader._is_same_visual_state(left, right))
 
 
 if __name__ == "__main__":

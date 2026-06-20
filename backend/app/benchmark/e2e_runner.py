@@ -10,7 +10,8 @@ import httpx
 from app.benchmark.note_quality import load_task_report, write_report_files
 
 
-TERMINAL_STATUSES = {"SUCCESS", "FAILED"}
+TERMINAL_STATUSES = {"SUCCESS", "PARTIAL_SUCCESS", "FAILED"}
+CONTENT_READY_STATUSES = {"SUCCESS", "PARTIAL_SUCCESS"}
 
 
 @dataclass
@@ -116,11 +117,15 @@ def run_e2e_benchmark(
 
     issues: list[str] = []
     quality_report_path = None
-    if final_status == "SUCCESS":
+    if final_status in CONTENT_READY_STATUSES:
         quality_report = load_task_report(task_id, note_output_dir, static_dir)
         quality_json_path, _quality_md_path = write_report_files(quality_report, report_path)
         quality_report_path = str(quality_json_path)
         issues.extend(quality_report.issues)
+        if final_status == "PARTIAL_SUCCESS" and not any(
+            issue.startswith("partial-success") for issue in issues
+        ):
+            issues.append(f"partial-success:{final_message}")
     else:
         issues.append(f"terminal-status:{final_status}:{final_message}")
 

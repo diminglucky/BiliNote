@@ -25,6 +25,23 @@ def _prepare_node(data: VisualScreenshotGraphState) -> dict[str, Any]:
     }
 
 
+def _build_visual_inventory_node(data: VisualScreenshotGraphState) -> dict[str, Any]:
+    state = data["state"]
+    if getattr(state, "visual_inventory", None) is None:
+        data["agent"].publish_stage_update(state, "正在扫描视频画面，建立截图候选清单")
+        state.visual_inventory = data["agent"].build_visual_inventory(
+            state.video_path,
+            state.duration,
+            state.transcript_segments,
+        )
+        data["agent"].record_visual_inventory_report(state)
+        data["agent"].publish_stage_update(
+            state,
+            f"已发现 {len(state.visual_inventory or [])} 个候选画面，正在分析插图位置",
+        )
+    return {"state": state}
+
+
 def _filter_marker_node(data: VisualScreenshotGraphState) -> dict[str, Any]:
     return {"state": data["agent"].filter_marker_node(data["state"])}
 
@@ -70,12 +87,14 @@ def build_visual_screenshot_graph():
     from langgraph.graph import END, START, StateGraph
 
     graph = StateGraph(VisualScreenshotGraphState)
+    graph.add_node("build_visual_inventory", _build_visual_inventory_node)
     graph.add_node("prepare_state", _prepare_node)
     graph.add_node("filter_marker", _filter_marker_node)
     graph.add_node("plan_slots", _plan_slots_node)
     graph.add_node("process_slot", _process_slot_node)
     graph.add_node("compose_images", _compose_images_node)
-    graph.add_edge(START, "prepare_state")
+    graph.add_edge(START, "build_visual_inventory")
+    graph.add_edge("build_visual_inventory", "prepare_state")
     graph.add_edge("prepare_state", "filter_marker")
     graph.add_edge("filter_marker", "plan_slots")
     graph.add_conditional_edges("plan_slots", _dispatch_slot_workers)

@@ -270,7 +270,7 @@ class VideoReader:
         if left.exact_hash == right.exact_hash:
             return True
         distance = self._hamming_distance(left.perceptual_hash, right.perceptual_hash)
-        if distance < 3:
+        if distance <= 3:
             return True
         return False
 
@@ -325,7 +325,7 @@ class VideoReader:
             if not timestamps:
                 return []
 
-            # 骞惰鎻愬彇甯?
+            # Extract frames concurrently.
             max_workers = min(os.cpu_count() or 4, 8, len(timestamps))
             frame_results: dict[int, str | None] = {}
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -334,7 +334,7 @@ class VideoReader:
                     ts = futures[future]
                     frame_results[ts] = future.result()
 
-            # 鎸夋椂闂存埑椤哄簭鏁寸悊缁撴灉锛屽苟杩涜鍘婚噸
+            # Reorder by timestamp and dedupe visually similar frames.
             candidates = []
             for ts in timestamps:
                 output_path = frame_results.get(ts)
@@ -439,4 +439,3 @@ class VideoReader:
         except Exception as e:
             logger.error(f"Video reader failed: {e}")
             raise ValueError("Video processing failed")
-

@@ -23,13 +23,14 @@ def _screenshot_extension() -> str:
 
 def generate_screenshot(video_path: str, output_dir: str, timestamp: int, index: int) -> str:
     """
-    ?? ffmpeg ?????????????
+    Capture a single frame with ffmpeg.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     extension = _screenshot_extension()
-    filename = f"screenshot_{index:03}_{uuid.uuid4()}.{extension}"
+    safe_timestamp = max(0, int(timestamp))
+    filename = f"screenshot_t{safe_timestamp:06}_{index:03}_{uuid.uuid4()}.{extension}"
     output_path = output_dir / filename
 
     command = [

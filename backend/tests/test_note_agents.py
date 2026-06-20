@@ -1,14 +1,33 @@
 import json
 import pathlib
+import shutil
 import sys
-import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+TEST_TMP_ROOT = ROOT / ".test_tmp"
+
+
+class ProjectTempDir:
+    def __init__(self, prefix="note_agents_"):
+        self.prefix = prefix
+        self.path: pathlib.Path | None = None
+
+    def __enter__(self):
+        TEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+        self.path = TEST_TMP_ROOT / f"{self.prefix}{uuid.uuid4().hex}"
+        self.path.mkdir()
+        return str(self.path)
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        if self.path is not None:
+            shutil.rmtree(self.path, ignore_errors=True)
 
 
 from app.agents.note_agents import (
@@ -34,6 +53,7 @@ from app.services.note import NoteGenerator
 from app.utils.task_status_writer import write_status_record
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
 from app.models.audio_model import AudioDownloadResult
+from app.services.visual_inventory_agent import VisualSceneCandidate
 
 
 class TestNoteAgents(unittest.TestCase):
@@ -65,7 +85,7 @@ class TestNoteAgents(unittest.TestCase):
         )
 
     def test_write_status_record_does_not_initialize_generator(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             write_status_record(
                 task_id="task-1",
                 status=TaskStatus.PENDING,
@@ -114,7 +134,7 @@ class TestNoteAgents(unittest.TestCase):
 
         downloader = _Downloader()
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             cache_path = pathlib.Path(tmp_dir) / "task_audio.json"
             request = DownloadRequest(
                 video_url="https://example.com/video",
@@ -181,7 +201,7 @@ class TestNoteAgents(unittest.TestCase):
             handle_exception=lambda task_id, exc: exceptions.append((task_id, exc)),
         )
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             cache_path = pathlib.Path(tmp_dir) / "task_audio.json"
             result = DownloadAgent(services).run(
                 DownloadRequest(
@@ -216,7 +236,7 @@ class TestNoteAgents(unittest.TestCase):
                     raw_info={},
                 )
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             video_path = pathlib.Path(tmp_dir) / "video.mp4"
             video_path.write_bytes(b"video")
             cache_path = pathlib.Path(tmp_dir) / "task_audio.json"
@@ -253,7 +273,7 @@ class TestNoteAgents(unittest.TestCase):
                 download_calls.append(kwargs)
                 raise AssertionError("audio should be reused from cache")
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             video_path = pathlib.Path(tmp_dir) / "cached-low.mp4"
             video_path.write_bytes(b"video")
             cache_path = pathlib.Path(tmp_dir) / "task_audio.json"
@@ -310,7 +330,7 @@ class TestNoteAgents(unittest.TestCase):
             def download_subtitles(self, _url):
                 raise AssertionError("platform subtitles should not be called")
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             cache_path = pathlib.Path(tmp_dir) / "task_transcript.json"
             cache_path.write_text(
                 json.dumps(
@@ -345,7 +365,7 @@ class TestNoteAgents(unittest.TestCase):
             def download_subtitles(self, _url):
                 return source
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             cache_path = pathlib.Path(tmp_dir) / "task_transcript.json"
             transcript = TranscriptAgent(self._services()).load_cached_or_platform_subtitles(
                 "https://example.com/video",
@@ -371,7 +391,7 @@ class TestNoteAgents(unittest.TestCase):
                     segments=[TranscriptSegment(start=0, end=1, text="generated transcript")],
                 )
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             cache_path = pathlib.Path(tmp_dir) / "task_transcript.json"
             result = TranscriptAgent(self._services(statuses=statuses, transcriber=_Transcriber())).run(
                 TranscriptRequest(
@@ -403,7 +423,7 @@ class TestNoteAgents(unittest.TestCase):
                     segments=[TranscriptSegment(start=0, end=1, text="fallback transcript")],
                 )
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             result = TranscriptAgent(self._services(statuses=statuses, transcriber=_Transcriber())).resolve(
                 TranscriptRequest(
                     video_url="https://example.com/video",
@@ -440,7 +460,7 @@ class TestNoteAgents(unittest.TestCase):
             segments=[TranscriptSegment(start=0, end=1, text="hello")],
         )
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             markdown_path = pathlib.Path(tmp_dir) / "task_markdown.md"
             gpt = _Gpt()
             result = NoteWriterAgent(self._services(statuses=statuses)).run(
@@ -530,7 +550,7 @@ class TestNoteAgents(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertEqual(updates[0][0], "task-1")
-        self.assertEqual(updates[0][3], TaskStatus.SUCCESS)
+        self.assertEqual(updates[0][3], TaskStatus.PARTIAL_SUCCESS)
 
     def test_visual_enhancement_agent_submits_existing_video(self):
         submitted = []
@@ -551,7 +571,7 @@ class TestNoteAgents(unittest.TestCase):
             def enhance_saved_note(self, *_args):
                 return True
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             video_path = pathlib.Path(tmp_dir) / "video.mp4"
             video_path.write_bytes(b"video")
             note = type(
@@ -600,7 +620,7 @@ class TestNoteAgents(unittest.TestCase):
             def enhance_saved_note(self, *_args):
                 return True
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             video_path = pathlib.Path(tmp_dir) / "video.mp4"
             video_path.write_bytes(b"video")
             note = type(
@@ -624,7 +644,7 @@ class TestNoteAgents(unittest.TestCase):
             )
 
         self.assertEqual(updates[0][0], "task-1")
-        self.assertEqual(updates[0][3], TaskStatus.SUCCESS)
+        self.assertEqual(updates[0][3], TaskStatus.PARTIAL_SUCCESS)
         self.assertIn("worker failed", updates[0][4])
 
     def test_execution_plan_keeps_screenshot_composer_background_when_deferred(self):
@@ -696,7 +716,7 @@ class TestNoteAgents(unittest.TestCase):
                 captured["indexed"] = request.task_id
                 return True
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             plan = build_note_execution_plan(
                 AgentExecutionContext(
                     task_id="task-1",
@@ -783,7 +803,7 @@ class TestNoteAgents(unittest.TestCase):
             def run(self, request):
                 return request.markdown
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             plan = build_note_execution_plan(
                 AgentExecutionContext(
                     task_id="task-1",
@@ -817,6 +837,129 @@ class TestNoteAgents(unittest.TestCase):
 
         self.assertEqual(result.markdown, "## Important *Content-[00:01]\n")
         self.assertTrue(any("plan_visuals: optional step failed" in item for item in result.diagnostics))
+
+    def test_plan_executor_passes_visual_inventory_into_visual_planning(self):
+        transcript = TranscriptResult(
+            language="zh",
+            full_text="hello",
+            segments=[TranscriptSegment(start=0, end=10, text="这里展示最终结果页面")],
+        )
+        audio = AudioDownloadResult(
+            file_path="audio.mp3",
+            title="video",
+            duration=120,
+            cover_url="",
+            platform="bilibili",
+            video_id="video-1",
+            raw_info={},
+            video_path="video.mp4",
+        )
+        inventory = [
+            VisualSceneCandidate(
+                start=10,
+                end=30,
+                representative_ts=22,
+                score=0.82,
+                scene_type="result",
+                reasons=["result"],
+            )
+        ]
+        captured = {}
+        status_updates = []
+
+        class _TranscriptAgent:
+            def load_cached_or_platform_subtitles(self, **_kwargs):
+                return transcript
+
+        class _DownloadAgent:
+            video_path = pathlib.Path("video.mp4")
+            video_img_urls = []
+
+            @staticmethod
+            def needs_full_download(**_kwargs):
+                return True
+
+            def run(self, _request):
+                return audio
+
+        class _WriterAgent:
+            def run(self, _request):
+                return "## 环境处理 *Content-[00:00]\n这里说明准备过程。\n"
+
+        class _ScreenshotAgent:
+            def build_visual_inventory(self, _video_path, _duration, _segments):
+                return inventory
+
+            def prepare_state(self, state):
+                captured["visual_inventory"] = state.visual_inventory
+                state.matches = []
+                state.visual_plans = []
+                state.slots = []
+                state.generated_images = []
+                state.generated_image_paths = []
+                state.published_image_paths = []
+                return state
+
+            def filter_marker_node(self, state):
+                return state
+
+            def plan_slots_node(self, state):
+                return state
+
+            def create_visual_reader(self, _video_path):
+                return object()
+
+            def apply_screenshot_slot_results(self, _state, _results, _visual_reader):
+                return None
+
+        class _ComposerAgent:
+            def __init__(self):
+                self._screenshot_agent = _ScreenshotAgent()
+
+            def screenshot_agent(self):
+                return self._screenshot_agent
+
+            def run(self, request):
+                return request.markdown
+
+        with ProjectTempDir() as tmp_dir:
+            plan = build_note_execution_plan(
+                AgentExecutionContext(
+                    task_id="task-1",
+                    video_url="https://example.com/video",
+                    platform="bilibili",
+                    quality="medium",
+                    formats=("screenshot",),
+                    screenshot=True,
+                    defer_screenshots=False,
+                )
+            )
+            context = AgentRuntimeContext(
+                task_id="task-1",
+                video_url="https://example.com/video",
+                platform="bilibili",
+                quality="medium",
+                formats=["screenshot"],
+                wants_screenshot=True,
+                wants_link=False,
+                note_output_dir=pathlib.Path(tmp_dir),
+                downloader=object(),
+                gpt=object(),
+            )
+
+            result = PlanExecutor(
+                download_agent=_DownloadAgent(),
+                transcript_agent=_TranscriptAgent(),
+                note_writer_agent=_WriterAgent(),
+                markdown_composer_agent=_ComposerAgent(),
+                status_updater=lambda *args: status_updates.append(args),
+            ).run(plan, context)
+
+        self.assertEqual(captured["visual_inventory"], inventory)
+        self.assertEqual(result.visual_inventory, inventory)
+        self.assertTrue(any("build_visual_inventory: found 1" in item for item in result.diagnostics))
+        self.assertTrue(any(update[1] == TaskStatus.ENHANCING for update in status_updates))
+        self.assertTrue(any("候选画面" in (update[2] or "") for update in status_updates))
 
     def test_plan_executor_keeps_base_note_when_screenshot_video_missing(self):
         transcript = TranscriptResult(
@@ -860,7 +1003,7 @@ class TestNoteAgents(unittest.TestCase):
             def run(self, request):
                 return request.markdown
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             plan = build_note_execution_plan(
                 AgentExecutionContext(
                     task_id="task-1",
@@ -936,7 +1079,7 @@ class TestNoteAgents(unittest.TestCase):
         generator.download_agent = _DownloadAgent()
         generator.note_writer_agent = _NoteWriterAgent()
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             output_dir = pathlib.Path(tmp_dir)
             with (
                 patch("app.services.note.NOTE_OUTPUT_DIR", output_dir),

@@ -334,6 +334,11 @@ cython_debug/
 /backend/.idea/*
 /backend/config/*
 /backend/vector_db/
+/backend/.runtime_tmp/
+/backend/.test_tmp/
+/backend/pytest_tmp/
+/backend/visual-temp-test-root/
+/.tmp/
 /BiliNote_frontend/.idea/*
 /BiliNote_frontend/src-tauri/bin/
 

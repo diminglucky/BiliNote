@@ -133,6 +133,11 @@ export function MarkdownHeader({
                 {taskStatus === 'ENHANCING' ? '截图增强中' : '重新生成中'}
               </Badge>
             )}
+            {taskStatus === 'PARTIAL_SUCCESS' && (
+              <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-700">
+                截图未完全完成
+              </Badge>
+            )}
           </div>
         </div>
 

@@ -573,10 +573,10 @@ def get_task_status(task_id: str, generation_token: Optional[str] = None):
         if generation_token and status_generation_token and status_generation_token != generation_token:
             return _pending_for_generation()
 
-        if status == TaskStatus.SUCCESS.value:
+        if status in {TaskStatus.SUCCESS.value, TaskStatus.PARTIAL_SUCCESS.value}:
             # 成功状态的话，继续读取最终笔记内容
             if os.path.exists(result_path):
-                return _success_response(message)
+                return _success_response(message, status)
             else:
                 # 理论上不会出现，保险处理
                 return R.success({

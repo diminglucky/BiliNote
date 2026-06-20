@@ -2,8 +2,8 @@ import importlib.util
 import json
 import os
 import pathlib
+import shutil
 import sys
-import tempfile
 import types
 import unittest
 from unittest.mock import patch
@@ -14,6 +14,25 @@ from PIL import Image, ImageDraw
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+TEST_TMP_ROOT = ROOT / ".test_tmp"
+
+
+class ProjectTempDir:
+    def __init__(self, prefix="note_screenshot_"):
+        self.prefix = prefix
+        self.path: pathlib.Path | None = None
+
+    def __enter__(self):
+        import uuid
+
+        TEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+        self.path = TEST_TMP_ROOT / f"{self.prefix}{uuid.uuid4().hex}"
+        self.path.mkdir()
+        return str(self.path)
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        if self.path is not None:
+            shutil.rmtree(self.path, ignore_errors=True)
 
 
 def _install_stubs():
@@ -141,6 +160,7 @@ def _install_stubs():
     modules["app.transcriber.base"].Transcriber = object
     modules["app.transcriber.transcriber_provider"].get_transcriber = lambda *_args, **_kwargs: None
     modules["app.transcriber.transcriber_provider"]._transcribers = {}
+    modules["app.utils.note_helper"].normalize_markdown_toc = lambda markdown, **_kwargs: markdown
     modules["app.utils.note_helper"].replace_content_markers = lambda markdown, **_kwargs: markdown
     modules["app.utils.note_helper"].prepend_source_link = lambda markdown, *_args, **_kwargs: markdown
     modules["app.utils.status_code"].StatusCode = object
@@ -193,7 +213,7 @@ def _load_note_module():
 
 note_module = _load_note_module()
 NoteGenerator = note_module.NoteGenerator
-from app.services.visual_screenshot_agent import VisualScreenshotAgent, VisualScreenshotState
+from app.services.visual_screenshot_agent import VisualScreenshotAgent, VisualScreenshotState, VisualSectionPlan
 from app.utils.video_reader import FrameCandidate
 
 
@@ -279,7 +299,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
         self.assertEqual(state.matches, [])
         self.assertEqual(state.visual_plans, [])
         self.assertEqual(state.generated_images, [])
-        self.assertEqual(state.diagnostics, [])
+        self.assertFalse(any("visual_inventory:" in item for item in state.diagnostics or []))
         self.assertEqual(state.execution_engine, "local")
 
     def test_visual_agent_raises_when_langgraph_fails(self):
@@ -370,7 +390,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
         )()
         transcript = type("_Transcript", (), {"segments": []})()
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             markdown_path = pathlib.Path(tmp_dir) / "task-1_markdown.md"
             with patch.dict(
                 note_module.NoteWriterAgent.summarize_text.__globals__,
@@ -457,6 +477,49 @@ class TestNoteScreenshotFallback(unittest.TestCase):
         markers = VisualScreenshotAgent.content_line_markers(markdown)
 
         self.assertEqual(markers, [(3, 1224)])
+
+    def test_content_markers_read_replaced_source_links(self):
+        markdown = (
+            "## 目录\n"
+            "- [Hermes Agent *Content-[01:39]*](#hermes-agent)\n\n"
+            "## Hermes Agent [原片 @ 01:39](https://www.bilibili.com/video/BV1?p=1&t=99)\n"
+            "This section shows code, UI, and architecture.\n\n"
+            "## NanoClo [原片 @ 09:28](https://www.bilibili.com/video/BV1?p=1&t=568)\n"
+            "This section shows commands and final result.\n"
+        )
+
+        markers = VisualScreenshotAgent.content_line_markers(markdown)
+
+        self.assertEqual(markers, [(3, 99), (6, 568)])
+
+    def test_structure_filter_does_not_steal_marker_from_previous_section(self):
+        markdown = (
+            "## Intro *Content-[00:00]\n"
+            "*Screenshot-[00:35]\n\n"
+            "## Hermes *Content-[01:39]\n"
+            "This section shows code and UI result.\n"
+        )
+        matches = VisualScreenshotAgent.extract_screenshot_timestamps(markdown)
+        plans = [
+            VisualSectionPlan(
+                title="Hermes",
+                start=99,
+                end=180,
+                score=6.0,
+                reasons=["code"],
+                line_index=3,
+                insert_line=4,
+            )
+        ]
+
+        filtered_markdown, filtered = VisualScreenshotAgent.filter_screenshot_matches_by_structure(
+            markdown,
+            matches,
+            plans,
+        )
+
+        self.assertEqual(filtered, [])
+        self.assertNotIn("*Screenshot-[00:35]", filtered_markdown)
 
     def test_structural_planner_skips_text_only_notes(self):
         generator = NoteGenerator.__new__(NoteGenerator)
@@ -590,7 +653,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             def _is_same_visual_state(_left, _right):
                 return True
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             created = []
 
             def _generate(_video_path, _output_dir, _timestamp, index):
@@ -648,7 +711,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
                     return 0.9, timestamp
                 return 0.35, timestamp
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             created = []
 
             def _generate(_video_path, _output_dir, timestamp, index):
@@ -709,7 +772,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
                     _Segment(34, 49, by_ts[45], [by_ts[34], by_ts[45], by_ts[49]]),
                 ]
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             created = []
 
             def _generate(_video_path, _output_dir, timestamp, index):
@@ -770,7 +833,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
                     _Segment(60, 118, by_ts[112], [by_ts[60], by_ts[78], by_ts[112], by_ts[118]]),
                 ]
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             created = []
 
             def _generate(_video_path, _output_dir, timestamp, index):
@@ -831,7 +894,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
                     _Segment(60, 118, by_ts[112], [by_ts[60], by_ts[78], by_ts[112], by_ts[118]]),
                 ]
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             created = []
 
             def _generate(_video_path, _output_dir, timestamp, index):
@@ -886,7 +949,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             def __init__(self):
                 self.client = _Client()
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             first = pathlib.Path(tmp_dir) / "first.jpg"
             second = pathlib.Path(tmp_dir) / "second.jpg"
             first.write_bytes(b"first")
@@ -912,7 +975,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
         class _Gpt:
             supports_vision = False
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             path = pathlib.Path(tmp_dir) / "frame.jpg"
             path.write_bytes(b"frame")
             candidates = [FrameCandidate(str(path), 10, 0.9, "a", 1)]
@@ -938,7 +1001,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             model = "qwen-vl"
             client = object()
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             def _generate(_video_path, _output_dir, timestamp, index):
                 path = pathlib.Path(tmp_dir) / f"shot_{index}_{timestamp}.jpg"
                 path.write_bytes(f"image-{timestamp}".encode())
@@ -982,7 +1045,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             model = "qwen-vl"
             client = object()
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             def _generate(_video_path, _output_dir, timestamp, index):
                 path = pathlib.Path(tmp_dir) / f"shot_{index}_{timestamp}.jpg"
                 path.write_bytes(f"image-{timestamp}".encode())
@@ -1027,7 +1090,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             model = "qwen-vl"
             client = object()
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             review_calls = []
 
             def _generate(_video_path, _output_dir, timestamp, index):
@@ -1107,7 +1170,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             model = "qwen-vl"
             client = object()
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             def _generate(_video_path, _output_dir, timestamp, index):
                 path = pathlib.Path(tmp_dir) / f"shot_{index}_{timestamp}.jpg"
                 path.write_bytes(f"image-{timestamp}".encode())
@@ -1158,7 +1221,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
             model = "qwen-vl"
             client = object()
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             created = []
 
             def _generate(_video_path, _output_dir, timestamp, index):
@@ -1198,7 +1261,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
                 timestamp = int(pathlib.Path(path).stem.split("_")[-1])
                 return (0.95 if timestamp < 100 else 0.7), timestamp
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             captured_timestamps = []
 
             def _generate(_video_path, _output_dir, timestamp, index):
@@ -1236,7 +1299,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
                 timestamp = int(pathlib.Path(path).stem.split("_")[-1])
                 return (0.96 if timestamp >= 100 else 0.72), timestamp
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             created = []
 
             def _generate(_video_path, _output_dir, timestamp, index):
@@ -1294,7 +1357,7 @@ class TestNoteScreenshotFallback(unittest.TestCase):
                 timestamp = int(pathlib.Path(path).stem.split("_")[-1])
                 return (0.97 if timestamp >= 100 else 0.74), timestamp
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with ProjectTempDir() as tmp_dir:
             created = []
 
             def _generate(_video_path, _output_dir, timestamp, index):
@@ -1347,4 +1410,3 @@ class TestNoteScreenshotFallback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -3,7 +3,12 @@ import toast from 'react-hot-toast'
 
 import { latestMarkdownContent, useTaskStore } from '@/store/taskStore'
 import { taskApi } from '@/services/taskApi'
-import { isFailedTaskStatus, isRunningTaskStatus, isSuccessTaskStatus } from '@/models/taskStateMachine'
+import {
+  isFailedTaskStatus,
+  isPartialSuccessTaskStatus,
+  isRunningTaskStatus,
+  isSuccessTaskStatus,
+} from '@/models/taskStateMachine'
 
 type StoreTask = ReturnType<typeof useTaskStore.getState>['tasks'][number]
 
@@ -41,6 +46,9 @@ export const useTaskPolling = (interval = 3000, enabled = true) => {
           const { markdown, transcript, audio_meta } = res.result
           if (isSuccessTaskStatus(status) && !isSuccessTaskStatus(latestTask.status)) {
             toast.success('笔记生成成功')
+          }
+          if (isPartialSuccessTaskStatus(status) && latestTask.status !== status) {
+            toast('正文已生成，但截图增强没有完全完成', { icon: '!' })
           }
           const latestMarkdown = latestMarkdownContent(latestTask.markdown)
           if (status !== latestTask.status || message !== latestTask.message || markdown !== latestMarkdown) {

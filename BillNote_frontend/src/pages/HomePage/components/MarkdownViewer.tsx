@@ -26,7 +26,12 @@ import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
 import MarkmapEditor from '@/pages/HomePage/components/MarkmapComponent.tsx'
 import ChatPanel from '@/pages/HomePage/components/ChatPanel.tsx'
 import VideoBanner from '@/pages/HomePage/components/VideoBanner.tsx'
-import { isRunningTaskStatus, taskStatusMessage, taskSteps } from '@/models/taskStateMachine'
+import {
+  isPartialSuccessTaskStatus,
+  isRunningTaskStatus,
+  taskStatusMessage,
+  taskSteps,
+} from '@/models/taskStateMachine'
 
 interface VersionNote {
   ver_id: string
@@ -566,6 +571,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
   const isRetrySubmitting = Boolean(currentTask?.isRetrySubmitting)
   const isTaskRunning = Boolean(currentTask && (isRunningTaskStatus(taskStatus) || isRetrySubmitting))
+  const isPartialSuccess = isPartialSuccessTaskStatus(taskStatus)
   const runningMessage = taskStatusMessage(taskStatus, taskMessage)
   const progressStatus = isRetrySubmitting ? 'PENDING' : taskStatus
   const progressMessage = isRetrySubmitting ? '正在提交重新生成请求，旧笔记会先保留' : runningMessage
@@ -848,6 +854,11 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                             重试
                           </Button>
                         </div>
+                      </div>
+                    )}
+                    {isPartialSuccess && (
+                      <div className="sticky top-0 z-10 border-b border-amber-200 bg-amber-50/95 px-5 py-3 text-sm text-amber-900 shadow-sm backdrop-blur">
+                        {taskMessage || '正文已生成，但截图增强没有完全完成。'}
                       </div>
                     )}
                     <div className="px-5 pt-5">

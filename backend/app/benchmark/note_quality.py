@@ -49,6 +49,7 @@ class NoteQualityReport:
     status: str
     generation_token: Optional[str]
     duration_seconds: Optional[float]
+    source_limited_screenshots: bool
     markdown_chars: int
     transcript_segments: int
     image_count: int
@@ -87,14 +88,20 @@ def load_task_report(
     if not isinstance(transcript_segments, list):
         transcript_segments = []
 
+    source_limited_screenshots = is_source_limited_screenshot_video(audio_meta)
     images = analyze_markdown_images(markdown, static_dir)
-    issues = collect_note_issues(markdown, images)
+    issues = collect_note_issues(
+        markdown,
+        images,
+        source_limited_screenshots=source_limited_screenshots,
+    )
     stage_timings = summarize_stage_timings(status_payload.get("history") or [])
     duplicate_pairs = count_duplicate_pairs(images)
     missing_count = sum(1 for item in images if not item.exists)
     low_quality_count = sum(1 for item in images if "low-quality" in item.issues)
     unresolved_markers = len(SCREENSHOT_MARKER_PATTERN.findall(markdown))
     inserted_sections = sorted({item.section for item in images if item.section})
+    status = str(status_payload.get("status") or "UNKNOWN")
 
     if unresolved_markers:
         issues.append(f"unresolved-screenshot-markers:{unresolved_markers}")
@@ -106,14 +113,18 @@ def load_task_report(
         issues.append(f"low-quality-images:{low_quality_count}")
     if images and not inserted_sections:
         issues.append("images-without-section-context")
+    if status == "PARTIAL_SUCCESS":
+        message = str(status_payload.get("message") or "").strip()
+        issues.append(f"partial-success:{message}" if message else "partial-success")
     if payload.get("enhance_token") and status_payload.get("status") == "SUCCESS" and not images:
         issues.append("screenshot-enhancement-finished-without-images")
 
     return NoteQualityReport(
         task_id=task_id,
-        status=str(status_payload.get("status") or "UNKNOWN"),
+        status=status,
         generation_token=payload.get("generation_token") or status_payload.get("generation_token"),
         duration_seconds=_safe_float(audio_meta.get("duration")),
+        source_limited_screenshots=source_limited_screenshots,
         markdown_chars=len(markdown),
         transcript_segments=len(transcript_segments),
         image_count=len(images),
@@ -141,6 +152,7 @@ def analyze_markdown_images(markdown: str, static_dir: str | Path) -> list[Image
                 report.issues.append("thin-markdown-context")
             reports.append(report)
     mark_duplicate_images(reports)
+    mark_image_clusters(reports, lines)
     return reports
 
 
@@ -292,7 +304,21 @@ def summarize_stage_timings(history: Iterable[Any]) -> list[StageTiming]:
     return ordered
 
 
-def collect_note_issues(markdown: str, images: list[ImageQualityReport]) -> list[str]:
+def is_source_limited_screenshot_video(audio_meta: dict[str, Any]) -> bool:
+    raw_info = audio_meta.get("raw_info") or {}
+    if not isinstance(raw_info, dict):
+        return False
+    video_quality = raw_info.get("video_quality") or {}
+    if not isinstance(video_quality, dict):
+        return False
+    return bool(video_quality.get("degraded") or video_quality.get("screenshot_ready") is False)
+
+
+def collect_note_issues(
+    markdown: str,
+    images: list[ImageQualityReport],
+    source_limited_screenshots: bool = False,
+) -> list[str]:
     issues: list[str] = []
     if len(markdown.strip()) < 500:
         issues.append("markdown-too-short")
@@ -304,6 +330,8 @@ def collect_note_issues(markdown: str, images: list[ImageQualityReport]) -> list
         issues.append("markers-left-without-rendered-images")
     for image in images:
         for issue in image.issues:
+            if source_limited_screenshots and issue == "low-resolution":
+                continue
             issues.append(f"image:{Path(image.path or image.url).name}:{issue}")
     return issues
 
@@ -330,6 +358,7 @@ def render_markdown_report(report: NoteQualityReport) -> str:
         f"- Markdown chars: {report.markdown_chars}",
         f"- Transcript segments: {report.transcript_segments}",
         f"- Video duration: {report.duration_seconds or 0:.1f}s",
+        f"- Source-limited screenshots: {'yes' if report.source_limited_screenshots else 'no'}",
         f"- Images: {report.image_count}",
         f"- Missing images: {report.missing_image_count}",
         f"- Low quality images: {report.low_quality_image_count}",
@@ -399,6 +428,40 @@ def has_useful_text_context(lines: list[str], line_index: int) -> bool:
         if idx != line_index and line.strip() and not IMAGE_PATTERN.search(line)
     )
     return len(context) >= 30
+
+
+def mark_image_clusters(reports: list[ImageQualityReport], lines: list[str]) -> None:
+    ordered = sorted(reports, key=lambda item: item.line_index)
+    for left, right in zip(ordered, ordered[1:]):
+        if right.line_index - left.line_index > 4:
+            continue
+        if has_heading_between_lines(lines, left.line_index, right.line_index):
+            continue
+        if has_intervening_text_between_images(lines, left.line_index, right.line_index):
+            continue
+        if "image-cluster" not in left.issues:
+            left.issues.append("image-cluster")
+        if "image-cluster" not in right.issues:
+            right.issues.append("image-cluster")
+
+
+def has_heading_between_lines(lines: list[str], left_index: int, right_index: int) -> bool:
+    start = max(0, min(left_index, right_index) + 1)
+    end = min(len(lines), max(left_index, right_index))
+    return any(re.match(r"^#{1,6}\s+", lines[idx].strip()) for idx in range(start, end))
+
+
+def has_intervening_text_between_images(lines: list[str], left_index: int, right_index: int) -> bool:
+    start = max(0, min(left_index, right_index) + 1)
+    end = min(len(lines), max(left_index, right_index))
+    text = "\n".join(
+        line.strip()
+        for line in lines[start:end]
+        if line.strip()
+        and not IMAGE_PATTERN.search(line)
+        and not re.match(r"^#{1,6}\s+", line.strip())
+    )
+    return len(text) >= 30
 
 
 def mark_duplicate_images(reports: list[ImageQualityReport]) -> None:

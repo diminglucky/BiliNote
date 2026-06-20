@@ -20,6 +20,7 @@ from app.enmus.task_status_enums import TaskStatus
 from app.models.audio_model import AudioDownloadResult
 from app.models.notes_model import NoteResult
 from app.models.transcriber_model import TranscriptResult
+from app.services.visual_inventory_agent import VisualSceneCandidate
 from app.services.visual_screenshot_agent import VisualScreenshotState
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ class AgentRuntimeContext:
     markdown: Optional[str] = None
     video_path: Optional[Path] = None
     video_img_urls: list[str] = field(default_factory=list)
+    visual_inventory: list[VisualSceneCandidate] = field(default_factory=list)
     visual_state: Optional[VisualScreenshotState] = None
     visual_slot_results: list[Any] = field(default_factory=list)
     result: Optional[NoteResult] = None
@@ -187,6 +189,9 @@ class PlanExecutor:
         if step_id == "write_markdown":
             self._write_markdown(context)
             return
+        if step_id == "build_visual_inventory":
+            self._build_visual_inventory(context)
+            return
         if step_id == "plan_visuals":
             self._plan_visuals(context)
             return
@@ -208,6 +213,19 @@ class PlanExecutor:
             self.chat_rag_agent.run(ChatIndexRequest(task_id=context.task_id))
             return
         logger.info("Skip unsupported plan step %s (%s)", step_id, role)
+
+    def _update_status(
+        self,
+        context: AgentRuntimeContext,
+        status: TaskStatus,
+        message: Optional[str] = None,
+    ) -> None:
+        if not self.status_updater:
+            return
+        try:
+            self.status_updater(context.task_id, status, message)
+        except Exception as exc:
+            logger.warning("Agent status update failed (%s): %s", status, exc)
 
     def _download(self, context: AgentRuntimeContext) -> None:
         if context.transcript is None:
@@ -276,6 +294,41 @@ class PlanExecutor:
             )
         )
 
+    def _build_visual_inventory(self, context: AgentRuntimeContext) -> None:
+        if not context.video_path:
+            context.visual_inventory = []
+            context.diagnostics.append("build_visual_inventory: skipped because video file is unavailable")
+            return
+        self._update_status(
+            context,
+            TaskStatus.ENHANCING,
+            "正在扫描视频画面，建立截图候选清单",
+        )
+        try:
+            agent = self.markdown_composer_agent.screenshot_agent()
+            build_inventory = getattr(agent, "build_visual_inventory", None)
+            if not build_inventory:
+                context.visual_inventory = []
+                context.diagnostics.append("build_visual_inventory: unavailable on screenshot agent")
+                return
+            context.visual_inventory = build_inventory(
+                context.video_path,
+                context.audio_meta.duration if context.audio_meta else None,
+                context.transcript.segments if context.transcript else [],
+            )
+        except Exception as exc:
+            context.visual_inventory = []
+            context.diagnostics.append(f"build_visual_inventory: failed: {exc}")
+            logger.warning("Visual inventory failed; falling back to document-only screenshot planning: %s", exc)
+        context.diagnostics.append(
+            f"build_visual_inventory: found {len(context.visual_inventory)} candidate scenes"
+        )
+        self._update_status(
+            context,
+            TaskStatus.ENHANCING,
+            f"已发现 {len(context.visual_inventory)} 个候选画面，正在分析插图位置",
+        )
+
     def _plan_visuals(self, context: AgentRuntimeContext) -> None:
         if not context.markdown:
             raise RuntimeError("Cannot plan screenshots before markdown is ready")
@@ -285,6 +338,11 @@ class PlanExecutor:
             context.visual_slot_results = []
             context.diagnostics.append("plan_visuals: skipped because video file is unavailable")
             return
+        self._update_status(
+            context,
+            TaskStatus.ENHANCING,
+            "正在根据文档章节规划截图位置",
+        )
         agent = self.markdown_composer_agent.screenshot_agent()
         state = VisualScreenshotState(
             markdown=context.markdown,
@@ -292,6 +350,7 @@ class PlanExecutor:
             duration=context.audio_meta.duration if context.audio_meta else None,
             gpt=context.gpt,
             transcript_segments=context.transcript.segments if context.transcript else [],
+            visual_inventory=context.visual_inventory,
         )
         state.execution_engine = "plan-executor"
         state = agent.prepare_state(state)

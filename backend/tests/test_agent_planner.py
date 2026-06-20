@@ -46,7 +46,10 @@ class TestAgentPlanner(unittest.TestCase):
         self.assertIn("plan_visuals", steps)
         self.assertIn("select_frames", steps)
         self.assertIn("compose_markdown", steps)
+        self.assertIn("build_visual_inventory", steps)
+        self.assertEqual(steps["build_visual_inventory"].mode, StepExecutionMode.BACKGROUND)
         self.assertEqual(steps["plan_visuals"].mode, StepExecutionMode.BACKGROUND)
+        self.assertEqual(steps["plan_visuals"].depends_on, ("build_visual_inventory",))
         self.assertEqual(steps["select_frames"].mode, StepExecutionMode.PARALLEL)
         self.assertEqual(steps["compose_markdown"].depends_on, ("select_frames",))
 

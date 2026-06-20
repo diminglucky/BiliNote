@@ -12,7 +12,12 @@ import {
 } from '@/components/ui/tooltip.tsx'
 import LazyImage from '@/components/LazyImage.tsx'
 import { FC, useEffect, useMemo, useState } from 'react'
-import { isFailedTaskStatus, isRunningTaskStatus, isSuccessTaskStatus } from '@/models/taskStateMachine'
+import {
+  isFailedTaskStatus,
+  isPartialSuccessTaskStatus,
+  isRunningTaskStatus,
+  isSuccessTaskStatus,
+} from '@/models/taskStateMachine'
 
 interface NoteHistoryProps {
   onSelect: (taskId: string) => void
@@ -136,6 +141,11 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
                 {isSuccessTaskStatus(task.status) && (
                   <div className="rounded-full bg-emerald-100 px-2 py-0.5 text-center font-medium text-emerald-700">
                     已完成
+                  </div>
+                )}
+                {isPartialSuccessTaskStatus(task.status) && (
+                  <div className="rounded-full bg-amber-100 px-2 py-0.5 text-center font-medium text-amber-700">
+                    部分完成
                   </div>
                 )}
                 {isRunningTaskStatus(task.status) ? (

@@ -13,7 +13,8 @@ interface StepBarProps {
 }
 
 const StepBar: FC<StepBarProps> = ({ steps, currentStep, compact = false }) => {
-  const currentIndex = Math.max(0, steps.findIndex(step => step.key === currentStep))
+  const foundIndex = steps.findIndex(step => step.key === currentStep)
+  const currentIndex = foundIndex >= 0 ? foundIndex : Math.max(0, steps.length - 1)
 
   if (compact) {
     return (
