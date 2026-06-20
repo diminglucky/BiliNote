@@ -120,6 +120,26 @@ class TestNoteRouterCacheRecovery(unittest.TestCase):
             self.assertEqual(status["status"], TaskStatus.SUCCESS.value)
             self.assertEqual(status["generation_token"], "generation-1")
 
+    def test_recover_result_from_cache_restores_cover_from_raw_thumbnail(self):
+        with ProjectTempDir() as tmp_dir:
+            output_dir = pathlib.Path(tmp_dir)
+            task_id = "task-1"
+            self._write_cache_files(output_dir, task_id)
+            audio_path = output_dir / f"{task_id}_audio.json"
+            audio_meta = json.loads(audio_path.read_text(encoding="utf-8"))
+            audio_meta["cover_url"] = ""
+            audio_meta["raw_info"] = {
+                "thumbnail": "https://example.com/cover.jpg",
+            }
+            audio_path.write_text(json.dumps(audio_meta, ensure_ascii=False), encoding="utf-8")
+
+            with patch.object(note_router, "NOTE_OUTPUT_DIR", str(output_dir)):
+                recovered = note_router._recover_result_from_cache(task_id)
+
+            self.assertTrue(recovered)
+            result = json.loads((output_dir / f"{task_id}.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["audio_meta"]["cover_url"], "https://example.com/cover.jpg")
+
     def test_retry_generation_clears_stale_result_but_keeps_media_caches(self):
         with ProjectTempDir() as tmp_dir:
             output_dir = pathlib.Path(tmp_dir)

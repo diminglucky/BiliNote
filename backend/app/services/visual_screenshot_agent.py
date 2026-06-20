@@ -9,13 +9,37 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple, Type
 
-from PIL import Image, ImageFilter, ImageStat
-
 from app.gpt.base import GPT
+from app.services.visual_document_planner import (
+    DocumentPlannerHooks,
+    DocumentVisualNeedPlanner,
+    VisualSectionAnalysis,
+    VisualSectionPlan,
+)
+from app.services.visual_frame_selector import (
+    ScreenshotCandidateSelectionRequest,
+    ScreenshotCandidateSelectionResult,
+    ScreenshotSelectionError,
+    VisualFrameSelector,
+    screenshot_review_mode,
+)
+from app.services.visual_markdown_composer import MarkdownComposerHooks, VisualMarkdownComposer
 from app.services.visual_inventory_agent import (
     VisualInventoryAgent,
     VisualSceneCandidate,
     visual_temporary_directory,
+)
+from app.services.visual_screenshot_report import (
+    summarize_visual_state,
+)
+from app.services.visual_slot_planner import (
+    VisualScreenshotSlot,
+    VisualSlotPlanner,
+    screenshot_content_budget,
+)
+from app.services.visual_slot_result_assembler import (
+    VisualSlotResultAssembler,
+    cleanup_paths as cleanup_visual_paths,
 )
 from app.services.visual_screenshot_graph import run_visual_screenshot_graph
 from app.utils.screenshot_marker import extract_screenshot_timestamps, normalize_screenshot_markers
@@ -33,79 +57,13 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, value))
 
 
-def screenshot_review_mode() -> str:
-    """Controls optional multimodal review for screenshot candidates.
-
-    off: use the fast local visual heuristic only.
-    balanced: only review high-value or ambiguous selections.
-    strict: require the vision model to pick a candidate.
-    assist: ask the vision model, but keep the local heuristic if review fails.
-    """
-    mode = os.getenv("SCREENSHOT_REVIEW_MODE", "off").strip().lower()
-    if mode in {"1", "true", "yes", "on", "enabled", "strict"}:
-        return "strict"
-    if mode in {"balanced", "smart", "auto"}:
-        return "balanced"
-    if mode in {"assist", "assisted", "optional"}:
-        return "assist"
-    return "off"
-
-
-def screenshot_content_budget(items: List[object]) -> int:
-    if not items:
-        return 0
-    total = 0
-    for item in items:
-        total += max(1, int(getattr(item, "suggested_count", 1)))
-    return max(1, min(40, total))
-
-
-@dataclass
-class VisualSectionPlan:
-    title: str
-    start: int
-    end: int
-    score: float
-    reasons: List[str]
-    line_index: int
-    section_start: int = 0
-    section_end: int = 0
-    context: str = ""
-    insert_line: Optional[int] = None
-    insert_reason: str = ""
-
-
-@dataclass
-class VisualSectionAnalysis:
-    title: str
-    line_index: int
-    start: int
-    end: int
-    score: float
-    reasons: List[str]
-    screenshot_times: List[int]
-    suggested_count: int
-    body: str
-    insert_lines: List[int]
-    visual_line_times: List[Tuple[int, int]]
-
-
-@dataclass
-class VisualScreenshotSlot:
-    slot_id: int
-    mode: str
-    timestamp: int
-    index: int
-    marker: Optional[str] = None
-    plan: Optional[VisualSectionPlan] = None
-
-
 @dataclass
 class VisualScreenshotSlotResult:
     slot: VisualScreenshotSlot
     candidate: Optional[FrameCandidate] = None
     generated_paths: Optional[List[str]] = None
     error: Optional[str] = None
+    selection_report: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -130,6 +88,7 @@ class VisualScreenshotState:
     execution_engine: str = "local"
     on_markdown_update: Optional[Callable[[str, int, str], None]] = None
     on_stage_update: Optional[Callable[[str], None]] = None
+    visual_report: Optional[dict[str, Any]] = None
 
 
 class VisualScreenshotAgent:
@@ -149,6 +108,21 @@ class VisualScreenshotAgent:
         self._vision_review_count = 0
         self._vision_review_lock = threading.Lock()
         self.inventory_agent = VisualInventoryAgent(video_reader_cls=video_reader_cls)
+        self.frame_selector = VisualFrameSelector(self.visual_keyword_score)
+        self.markdown_composer = VisualMarkdownComposer(
+            MarkdownComposerHooks(
+                content_line_markers=self.content_line_markers,
+                next_heading_line=self.next_heading_line,
+            )
+        )
+        self.slot_result_assembler = VisualSlotResultAssembler(
+            self.markdown_composer,
+            self.image_url,
+        )
+        self.slot_planner = VisualSlotPlanner(
+            self.matching_visual_plan,
+            slot_cls=VisualScreenshotSlot,
+        )
         self._slot_semaphore = threading.Semaphore(
             _env_int("SCREENSHOT_SLOT_CONCURRENCY", 2, 1, 8)
         )
@@ -180,13 +154,7 @@ class VisualScreenshotAgent:
 
     @staticmethod
     def summarize_run(state: VisualScreenshotState) -> dict[str, Any]:
-        return {
-            "planned_slots": state.planned_slot_count,
-            "successful_slots": state.successful_slot_count,
-            "failed_slots": state.failed_slot_count,
-            "duplicate_slots": state.duplicate_slot_count,
-            "diagnostics": list(state.diagnostics or []),
-        }
+        return summarize_visual_state(state)
 
     @staticmethod
     def _section_context(plan: Optional[VisualSectionPlan], markdown: str) -> str:
@@ -236,6 +204,7 @@ class VisualScreenshotAgent:
         state.generated_images = []
         state.generated_image_paths = []
         state.published_image_paths = []
+        state.visual_report = None
         return state
 
     @staticmethod
@@ -310,44 +279,7 @@ class VisualScreenshotAgent:
         return state
 
     def plan_screenshot_slots(self, state: VisualScreenshotState) -> List[VisualScreenshotSlot]:
-        matches = state.matches or []
-        visual_plans = state.visual_plans or []
-        slots: List[VisualScreenshotSlot] = []
-        selected_plan_starts: set[int] = set()
-
-        for idx, (marker, ts) in enumerate(matches):
-            plan = self.matching_visual_plan(ts, visual_plans)
-            if plan:
-                selected_plan_starts.add(plan.start)
-            slots.append(VisualScreenshotSlot(
-                slot_id=len(slots),
-                mode="marker",
-                timestamp=ts,
-                index=idx,
-                marker=marker,
-                plan=plan,
-            ))
-
-        supplement_limit = _env_int(
-            "SCREENSHOT_SUPPLEMENT_LIMIT",
-            screenshot_content_budget(visual_plans),
-            0,
-            40,
-        )
-        if supplement_limit > 0:
-            missing_plans = [plan for plan in visual_plans if plan.start not in selected_plan_starts]
-            missing_plans = sorted(missing_plans, key=lambda item: (-item.score, item.start))[:supplement_limit]
-            missing_plans.sort(key=lambda item: item.start)
-            for offset, plan in enumerate(missing_plans):
-                slots.append(VisualScreenshotSlot(
-                    slot_id=len(slots),
-                    mode="fallback",
-                    timestamp=plan.start,
-                    index=len(matches) + offset,
-                    plan=plan,
-                ))
-
-        return slots
+        return self.slot_planner.plan(state.matches or [], state.visual_plans or [])
 
     def process_screenshot_slot(
         self,
@@ -357,20 +289,27 @@ class VisualScreenshotAgent:
         generated_paths: List[str] = []
         plan = slot.plan
         with self._slot_semaphore:
+            selection_report: dict[str, Any] = {}
             try:
                 visual_reader = self.create_visual_reader(state.video_path)
-                candidate = self.best_screenshot_near_timestamp(
-                    video_path=state.video_path,
-                    timestamp=slot.timestamp,
-                    duration=state.duration,
-                    index=slot.index,
-                    visual_reader=visual_reader,
-                    search_end=plan.end if plan else None,
-                    gpt=state.gpt,
-                    section_title=plan.title if plan else "",
-                    section_context=self._section_context(plan, state.markdown),
-                    generated_image_paths=generated_paths,
+                selection = self.select_screenshot_candidate(
+                    ScreenshotCandidateSelectionRequest(
+                        video_path=state.video_path,
+                        timestamp=slot.timestamp,
+                        duration=state.duration,
+                        index=slot.index,
+                        visual_reader=visual_reader,
+                        image_output_dir=self.image_output_dir,
+                        screenshot_func=self.screenshot_func,
+                        search_end=plan.end if plan else None,
+                        gpt=state.gpt,
+                        section_title=plan.title if plan else "",
+                        section_context=self._section_context(plan, state.markdown),
+                        generated_image_paths=generated_paths,
+                    )
                 )
+                candidate = selection.candidate
+                selection_report = selection.report
                 if candidate is None:
                     raise RuntimeError(f"未找到可用截图候选: {slot.timestamp}")
                 if not Path(candidate.path).exists():
@@ -381,6 +320,20 @@ class VisualScreenshotAgent:
                     slot=slot,
                     candidate=candidate,
                     generated_paths=generated_paths,
+                    selection_report=selection_report,
+                )
+            except ScreenshotSelectionError as exc:
+                selection_report = exc.report
+                for image_path in generated_paths:
+                    try:
+                        Path(image_path).unlink(missing_ok=True)
+                    except Exception as cleanup_exc:
+                        logger.warning("清理失败截图候选失败 (%s): %s", image_path, cleanup_exc)
+                return VisualScreenshotSlotResult(
+                    slot=slot,
+                    generated_paths=generated_paths,
+                    error=str(exc),
+                    selection_report=selection_report,
                 )
             except Exception as exc:
                 for image_path in generated_paths:
@@ -392,6 +345,7 @@ class VisualScreenshotAgent:
                     slot=slot,
                     generated_paths=generated_paths,
                     error=str(exc),
+                    selection_report=selection_report,
                 )
 
     def apply_screenshot_slot_results(
@@ -405,131 +359,37 @@ class VisualScreenshotAgent:
         if state.generated_images is None:
             state.generated_images = []
 
-        inserted_visuals: List[FrameCandidate] = []
-        successful_slots = 0
-        failed_slots = 0
-        duplicate_slots = 0
-        line_placements: List[Tuple[int, int, str, str, FrameCandidate]] = []
-        fallback_placements: List[Tuple[int, str, str, FrameCandidate]] = []
-        published_images: List[Tuple[int, str, str, FrameCandidate]] = []
+        assembly = self.slot_result_assembler.assemble(
+            state.markdown,
+            results,
+            getattr(visual_reader, "_is_same_visual_state", lambda _left, _right: False),
+        )
+        state.markdown = assembly.markdown
+        state.generated_image_paths.extend(assembly.generated_image_paths)
+        for diagnostic in assembly.diagnostics:
+            self.add_diagnostic(state, diagnostic)
+        cleanup_visual_paths(assembly.cleanup_paths)
 
-        state.planned_slot_count = len(results)
-        for result in sorted(results, key=lambda item: item.slot.slot_id):
-            state.generated_image_paths.extend(result.generated_paths or [])
-            slot = result.slot
-            if result.error or result.candidate is None:
-                failed_slots += 1
-                self.add_diagnostic(state, f"{slot.mode}_failed:{slot.timestamp}:{result.error}")
-                logger.warning(
-                    "截图 slot 失败 (mode=%s timestamp=%s): %s",
-                    slot.mode,
-                    slot.timestamp,
-                    result.error,
-                )
-                if slot.mode == "marker" and slot.marker:
-                    state.markdown = state.markdown.replace(slot.marker, "", 1)
-                continue
-
-            candidate = result.candidate
-            if any(visual_reader._is_same_visual_state(prev, candidate) for prev in inserted_visuals):
-                duplicate_slots += 1
-                Path(candidate.path).unlink(missing_ok=True)
-                if slot.mode == "marker" and slot.marker:
-                    state.markdown = state.markdown.replace(slot.marker, "", 1)
-                continue
-
-            inserted_visuals.append(candidate)
-            image_markdown = f"![]({self.image_url(candidate.path)})"
-            if slot.mode == "marker" and slot.marker and slot.plan and slot.plan.insert_line is not None:
-                state.markdown = state.markdown.replace(slot.marker, "", 1)
-                line_placements.append((
-                    slot.plan.insert_line,
-                    candidate.timestamp,
-                    image_markdown,
-                    candidate.path,
-                    candidate,
-                ))
-            elif slot.mode == "marker" and slot.marker:
-                state.markdown = state.markdown.replace(slot.marker, image_markdown, 1)
-                published_images.append((candidate.timestamp, image_markdown, candidate.path, candidate))
-            elif slot.plan and slot.plan.insert_line is not None:
-                line_placements.append((
-                    slot.plan.insert_line,
-                    candidate.timestamp,
-                    image_markdown,
-                    candidate.path,
-                    candidate,
-                ))
-            else:
-                fallback_placements.append((candidate.timestamp, image_markdown, candidate.path, candidate))
-
-        if line_placements:
-            line_placements, skipped_placements = self.filter_line_placements_by_anchor(
-                state.markdown,
-                line_placements,
-            )
-            for _line_idx, timestamp, _image_markdown, image_path, _candidate in skipped_placements:
-                duplicate_slots += 1
-                self.add_diagnostic(state, f"placement_collapsed:{timestamp}")
-                Path(image_path).unlink(missing_ok=True)
-            ordered_placements = [
-                (line_idx, image_markdown)
-                for line_idx, _timestamp, image_markdown, _image_path, _candidate in sorted(
-                    line_placements,
-                    key=lambda item: (item[0], item[1]),
-                )
-            ]
-            state.markdown = self.insert_images_at_document_lines(state.markdown, ordered_placements)
-            for _line_idx, timestamp, image_markdown, image_path, _candidate in line_placements:
-                published_images.append((timestamp, image_markdown, image_path, _candidate))
-        if fallback_placements:
-            state.markdown = self.insert_fallback_images_near_sections(
-                state.markdown,
-                [(timestamp, image_markdown) for timestamp, image_markdown, _image_path, _candidate in sorted(
-                    fallback_placements,
-                    key=lambda item: item[0],
-                )],
-            )
-            for timestamp, image_markdown, image_path, candidate in fallback_placements:
-                published_images.append((timestamp, image_markdown, image_path, candidate))
-
-        if published_images:
-            state.markdown, published_images, cluster_skipped = self.filter_published_images_by_context(
-                state.markdown,
-                published_images,
-            )
-            for timestamp, _image_markdown, image_path, _candidate in cluster_skipped:
-                duplicate_slots += 1
-                self.add_diagnostic(state, f"image_cluster_collapsed:{timestamp}")
-                Path(image_path).unlink(missing_ok=True)
-
-        for timestamp, image_markdown, image_path, _candidate in published_images:
+        for timestamp, image_markdown, image_path, _candidate in assembly.published_images:
             if state.generated_images is not None:
                 state.generated_images.append((timestamp, image_markdown))
-            successful_slots += 1
             if self.publish_incremental_update(state, timestamp, image_markdown):
                 self.mark_published_image(state, image_path)
 
-        if not successful_slots and any(result.error for result in results):
+        if not assembly.successful_slots and any(result.error for result in results):
             logger.info("截图增强未插入成功截图，保留基础笔记")
-        state.successful_slot_count = successful_slots
-        state.failed_slot_count = failed_slots
-        state.duplicate_slot_count = duplicate_slots
+        state.planned_slot_count = assembly.planned_slots
+        state.successful_slot_count = assembly.successful_slots
+        state.failed_slot_count = assembly.failed_slots
+        state.duplicate_slot_count = assembly.duplicate_slots
+        state.visual_report = assembly.visual_report
 
     @staticmethod
     def prefer_line_placement(
         current: Tuple[int, int, str, str, FrameCandidate],
         candidate: Tuple[int, int, str, str, FrameCandidate],
     ) -> Tuple[int, int, str, str, FrameCandidate]:
-        current_frame = current[4]
-        candidate_frame = candidate[4]
-        if candidate_frame.score > current_frame.score + 0.08:
-            return candidate
-        if current_frame.score > candidate_frame.score + 0.08:
-            return current
-        if candidate[1] > current[1]:
-            return candidate
-        return current
+        return VisualMarkdownComposer.prefer_line_placement(current, candidate)
 
     @classmethod
     def filter_line_placements_by_anchor(
@@ -540,41 +400,7 @@ class VisualScreenshotAgent:
         List[Tuple[int, int, str, str, FrameCandidate]],
         List[Tuple[int, int, str, str, FrameCandidate]],
     ]:
-        if not placements:
-            return [], []
-
-        min_line_gap = _env_int("SCREENSHOT_INSERT_LINE_MIN_GAP", 4, 0, 12)
-        lines = markdown.splitlines()
-        best_by_line: dict[int, Tuple[int, int, str, str, FrameCandidate]] = {}
-        skipped: List[Tuple[int, int, str, str, FrameCandidate]] = []
-        for placement in sorted(placements, key=lambda item: (item[0], item[1])):
-            line_idx = placement[0]
-            current_key = next(
-                (
-                    existing_line
-                    for existing_line in sorted(best_by_line)
-                    if min_line_gap > 0
-                    and abs(line_idx - existing_line) < min_line_gap
-                    and not cls.has_heading_between_insert_lines(lines, existing_line, line_idx)
-                    and not cls.has_text_between_insert_lines(lines, existing_line, line_idx)
-                ),
-                line_idx if line_idx in best_by_line else None,
-            )
-            current = best_by_line.get(current_key) if current_key is not None else None
-            if current is None:
-                best_by_line[line_idx] = placement
-                continue
-
-            chosen = cls.prefer_line_placement(current, placement)
-            if chosen is current:
-                skipped.append(placement)
-            else:
-                skipped.append(current)
-                if current_key in best_by_line:
-                    del best_by_line[current_key]
-                best_by_line[line_idx] = placement
-
-        return sorted(best_by_line.values(), key=lambda item: (item[0], item[1])), skipped
+        return VisualMarkdownComposer.filter_line_placements_by_anchor(markdown, placements)
 
     @classmethod
     def filter_published_images_by_context(
@@ -586,96 +412,22 @@ class VisualScreenshotAgent:
         List[Tuple[int, str, str, FrameCandidate]],
         List[Tuple[int, str, str, FrameCandidate]],
     ]:
-        if len(images) < 2:
-            return markdown, images, []
-
-        lines = markdown.splitlines()
-        remaining = list(images)
-        image_lines: List[Tuple[int, Tuple[int, str, str, FrameCandidate]]] = []
-        for line_idx, line in enumerate(lines):
-            stripped = line.strip()
-            for record_idx, record in enumerate(remaining):
-                if stripped == record[1]:
-                    image_lines.append((line_idx, record))
-                    remaining.pop(record_idx)
-                    break
-
-        kept: List[Tuple[int, Tuple[int, str, str, FrameCandidate]]] = []
-        skipped: List[Tuple[int, str, str, FrameCandidate]] = []
-        for line_idx, record in image_lines:
-            current_idx = next(
-                (
-                    idx
-                    for idx, (kept_line, _kept_record) in enumerate(kept)
-                    if not cls.has_heading_between_line_indexes(lines, kept_line, line_idx)
-                    and not cls.has_text_between_line_indexes(lines, kept_line, line_idx)
-                ),
-                None,
-            )
-            if current_idx is None:
-                kept.append((line_idx, record))
-                continue
-
-            kept_line, kept_record = kept[current_idx]
-            chosen = cls.prefer_published_image(kept_record, record)
-            if chosen is kept_record:
-                skipped.append(record)
-            else:
-                skipped.append(kept_record)
-                kept[current_idx] = (line_idx, record)
-
-        if not skipped:
-            return markdown, images, []
-
-        skipped_remaining = list(skipped)
-        output: List[str] = []
-        for line in lines:
-            stripped = line.strip()
-            skip_idx = next(
-                (idx for idx, record in enumerate(skipped_remaining) if stripped == record[1]),
-                None,
-            )
-            if skip_idx is not None:
-                skipped_remaining.pop(skip_idx)
-                continue
-            output.append(line)
-
-        kept_images = [record for _line_idx, record in sorted(kept, key=lambda item: item[0])]
-        return "\n".join(output).rstrip() + "\n", kept_images, skipped
+        return VisualMarkdownComposer.filter_published_images_by_context(markdown, images)
 
     @staticmethod
     def prefer_published_image(
         current: Tuple[int, str, str, FrameCandidate],
         candidate: Tuple[int, str, str, FrameCandidate],
     ) -> Tuple[int, str, str, FrameCandidate]:
-        current_frame = current[3]
-        candidate_frame = candidate[3]
-        if candidate_frame.score > current_frame.score + 0.08:
-            return candidate
-        if current_frame.score > candidate_frame.score + 0.08:
-            return current
-        if candidate[0] > current[0]:
-            return candidate
-        return current
+        return VisualMarkdownComposer.prefer_published_image(current, candidate)
 
     @staticmethod
     def has_heading_between_line_indexes(lines: List[str], left_idx: int, right_idx: int) -> bool:
-        start = max(0, min(left_idx, right_idx) + 1)
-        end = min(len(lines), max(left_idx, right_idx))
-        return any(re.match(r"^#{1,6}\s+", lines[idx].strip()) for idx in range(start, end))
+        return VisualMarkdownComposer.has_heading_between_line_indexes(lines, left_idx, right_idx)
 
     @staticmethod
     def has_text_between_line_indexes(lines: List[str], left_idx: int, right_idx: int) -> bool:
-        start = max(0, min(left_idx, right_idx) + 1)
-        end = min(len(lines), max(left_idx, right_idx))
-        text = "\n".join(
-            line.strip()
-            for line in lines[start:end]
-            if line.strip()
-            and not re.match(r"^!\[[^\]]*\]\(", line.strip())
-            and not re.match(r"^#{1,6}\s+", line.strip())
-        )
-        return len(text) >= 30
+        return VisualMarkdownComposer.has_text_between_line_indexes(lines, left_idx, right_idx)
 
     def create_visual_reader(self, video_path: Path) -> VideoReader:
         return self.video_reader_cls(
@@ -725,6 +477,30 @@ class VisualScreenshotAgent:
     def image_url(self, image_path: str) -> str:
         filename = Path(image_path).name
         return f"{self.image_base_url.rstrip('/')}/{filename}"
+
+    def document_planner(self) -> DocumentVisualNeedPlanner:
+        return DocumentVisualNeedPlanner(
+            DocumentPlannerHooks(
+                content_line_markers=self.content_line_markers,
+                heading_line_markers_from_screenshots=self.heading_line_markers_from_screenshots,
+                transcript_segments_to_windows=self.transcript_segments_to_windows,
+                infer_section_markers_from_headings=self.infer_section_markers_from_headings,
+                clean_heading_title=self.clean_heading_title,
+                align_section_to_transcript=self.align_section_to_transcript,
+                visual_keyword_score=self.visual_keyword_score,
+                visual_scenes_for_section=self.visual_scenes_for_section,
+                suggested_screenshot_count=self.suggested_screenshot_count,
+                map_visual_lines_to_times=self.map_visual_lines_to_times,
+                choose_section_insert_lines=self.choose_section_insert_lines,
+                format_visual_inventory_context=self.format_visual_inventory_context,
+                timestamp_in_window=self.timestamp_in_window,
+                section_anchor_times=self.section_anchor_times,
+                spread_anchor_times=self.spread_anchor_times,
+                adaptive_min_gap=self.adaptive_min_gap,
+            ),
+            section_analysis_cls=VisualSectionAnalysis,
+            section_plan_cls=VisualSectionPlan,
+        )
 
     @staticmethod
     def timestamp_in_window(timestamp: int, start: int, end: int, tolerance: int = 0) -> bool:
@@ -875,80 +651,14 @@ class VisualScreenshotAgent:
         markdown: str,
         fallback_images: List[Tuple[int, str]],
     ) -> str:
-        lines = markdown.rstrip().splitlines()
-        markers = self.content_line_markers(markdown)
-        if not lines:
-            return "\n".join(image for _, image in fallback_images) + "\n"
-
-        if not markers:
-            image_lines = ["", "## 原片截图", ""]
-            image_lines.extend(image for _, image in fallback_images)
-            return markdown.rstrip() + "\n\n" + "\n".join(image_lines).rstrip() + "\n"
-
-        inserts: dict[int, List[str]] = {}
-        for ts, image_line in fallback_images:
-            marker = next((item for item in reversed(markers) if item[1] <= ts), None)
-            if marker is None:
-                marker = markers[0]
-            insert_line = self.next_heading_line(lines, marker[0])
-            inserts.setdefault(insert_line, []).append(image_line)
-
-        output: List[str] = []
-        for idx, line in enumerate(lines):
-            if idx in inserts:
-                if output and output[-1].strip():
-                    output.append("")
-                output.extend(inserts[idx])
-                output.append("")
-            output.append(line)
-
-        if len(lines) in inserts:
-            if output and output[-1].strip():
-                output.append("")
-            output.extend(inserts[len(lines)])
-
-        return "\n".join(output).rstrip() + "\n"
+        return self.markdown_composer.insert_fallback_images_near_sections(markdown, fallback_images)
 
     @staticmethod
     def insert_images_at_document_lines(
         markdown: str,
         placements: List[Tuple[int, str]],
     ) -> str:
-        if not placements:
-            return markdown
-
-        lines = markdown.rstrip().splitlines()
-        if not lines:
-            return "\n".join(image for _, image in placements).rstrip() + "\n"
-
-        inserts: dict[int, List[str]] = {}
-        for line_idx, image_line in placements:
-            safe_idx = max(0, min(len(lines), line_idx))
-            inserts.setdefault(safe_idx, []).append(image_line)
-
-        output: List[str] = []
-        for idx, line in enumerate(lines):
-            output.append(line)
-            after_idx = idx + 1
-            if after_idx in inserts:
-                if output and output[-1].strip():
-                    output.append("")
-                output.extend(inserts[after_idx])
-                output.append("")
-
-        if 0 in inserts:
-            prefix: List[str] = []
-            prefix.extend(inserts[0])
-            if prefix and lines:
-                prefix.append("")
-            output = prefix + output
-
-        if len(lines) in inserts:
-            existing_insert_count = len(inserts[len(lines)])
-            if existing_insert_count and output[-existing_insert_count:] == inserts[len(lines)]:
-                return "\n".join(output).rstrip() + "\n"
-
-        return "\n".join(output).rstrip() + "\n"
+        return VisualMarkdownComposer.insert_images_at_document_lines(markdown, placements)
 
     @staticmethod
     def filter_screenshot_matches_by_structure(
@@ -1336,22 +1046,11 @@ class VisualScreenshotAgent:
 
     @staticmethod
     def has_heading_between_insert_lines(lines: List[str], left_insert: int, right_insert: int) -> bool:
-        start = max(0, min(left_insert, right_insert))
-        end = min(len(lines), max(left_insert, right_insert))
-        return any(re.match(r"^#{1,6}\s+", lines[idx].strip()) for idx in range(start, end))
+        return VisualMarkdownComposer.has_heading_between_insert_lines(lines, left_insert, right_insert)
 
     @staticmethod
     def has_text_between_insert_lines(lines: List[str], left_insert: int, right_insert: int) -> bool:
-        start = max(0, min(left_insert, right_insert))
-        end = min(len(lines), max(left_insert, right_insert))
-        text = "\n".join(
-            line.strip()
-            for line in lines[start:end]
-            if line.strip()
-            and not re.match(r"^!\[[^\]]*\]\(", line.strip())
-            and not re.match(r"^#{1,6}\s+", line.strip())
-        )
-        return len(text) >= 30
+        return VisualMarkdownComposer.has_text_between_insert_lines(lines, left_insert, right_insert)
 
     @staticmethod
     def nearest_unused_scene_time(
@@ -1439,98 +1138,11 @@ class VisualScreenshotAgent:
 
     @staticmethod
     def select_candidate_offsets(offsets: List[int], max_candidates: int) -> List[int]:
-        ordered = sorted(set(max(0, offset) for offset in offsets))
-        if len(ordered) <= max_candidates:
-            return ordered
-
-        selected = {ordered[0], ordered[-1]}
-        for preferred in (22, 34, 45, 50, 60, 90):
-            if preferred in ordered and len(selected) < max_candidates:
-                selected.add(preferred)
-
-        remaining_slots = max_candidates - len(selected)
-        if remaining_slots > 0:
-            interior = [offset for offset in ordered[1:-1] if offset not in selected]
-            for idx in range(remaining_slots):
-                if not interior:
-                    break
-                source_idx = round(idx * (len(interior) - 1) / max(1, remaining_slots - 1))
-                selected.add(interior[source_idx])
-        return sorted(selected)
+        return VisualFrameSelector.select_candidate_offsets(offsets, max_candidates)
 
     @staticmethod
     def non_note_frame_penalty(file_path: str, timestamp: int, duration: Optional[float] = None) -> float:
-        """Penalize sparse end-card/CTA frames that are clear but not useful for notes."""
-        try:
-            Image.init()
-            with Image.open(file_path) as img:
-                rgb = img.convert("RGB").resize((160, 90), Image.Resampling.LANCZOS)
-                gray = rgb.convert("L")
-                hsv = rgb.convert("HSV")
-                stats = ImageStat.Stat(gray)
-                entropy = gray.entropy()
-                edges = gray.filter(ImageFilter.FIND_EDGES)
-                edge_pixels = sum(1 for value in edges.getdata() if value > 28)
-                edge_ratio = edge_pixels / max(1, gray.width * gray.height)
-                saturation_data = list(hsv.getchannel("S").getdata())
-                value_data = list(hsv.getchannel("V").getdata())
-                center = rgb.crop((
-                    int(rgb.width * 0.30),
-                    int(rgb.height * 0.33),
-                    int(rgb.width * 0.70),
-                    int(rgb.height * 0.70),
-                ))
-                bottom = gray.crop((
-                    0,
-                    int(gray.height * 0.82),
-                    gray.width,
-                    gray.height,
-                ))
-        except Exception:
-            return 0.0
-
-        pixel_count = max(1, len(value_data))
-        colorful_ratio = sum(
-            1 for sat, val in zip(saturation_data, value_data)
-            if sat > 46 and val > 55
-        ) / pixel_count
-        very_bright_ratio = sum(1 for val in value_data if val > 235) / pixel_count
-        very_dark_ratio = sum(1 for val in value_data if val < 35) / pixel_count
-        near_video_end = bool(duration and timestamp >= max(float(duration) * 0.88, float(duration) - 120))
-        center_pixels = list(center.getdata())
-        center_black_ratio = sum(
-            1 for red, green, blue in center_pixels
-            if red < 42 and green < 42 and blue < 42
-        ) / max(1, len(center_pixels))
-        bottom_values = list(bottom.getdata())
-        bottom_text_ratio = sum(1 for val in bottom_values if val < 145) / max(1, len(bottom_values))
-        sparse_white_card = (
-            very_bright_ratio >= 0.82
-            and colorful_ratio <= 0.035
-            and entropy <= 2.2
-            and edge_ratio <= 0.16
-            and very_dark_ratio <= 0.18
-        )
-        end_card_cta = (
-            very_bright_ratio >= 0.76
-            and colorful_ratio <= 0.06
-            and center_black_ratio >= 0.055
-            and bottom_text_ratio >= 0.018
-            and edge_ratio <= 0.20
-        )
-        if end_card_cta and near_video_end:
-            return 0.78
-        if end_card_cta:
-            return 0.50
-        if sparse_white_card and (near_video_end or entropy <= 1.35):
-            return 0.72
-        if sparse_white_card:
-            return 0.42
-        if very_bright_ratio >= 0.90 and colorful_ratio <= 0.02 and entropy <= 1.4:
-            return 0.55
-        if stats.mean[0] >= 238 and entropy <= 1.1 and edge_ratio <= 0.08:
-            return 0.45
-        return 0.0
+        return VisualFrameSelector.non_note_frame_penalty(file_path, timestamp, duration)
 
     def review_screenshot_candidates(
         self,
@@ -1656,28 +1268,12 @@ class VisualScreenshotAgent:
         section_title: str = "",
         section_context: str = "",
     ) -> bool:
-        if not segments:
-            return False
-        text = f"{section_title}\n{section_context}"
-        value_score, _reasons = VisualScreenshotAgent.visual_keyword_score(text)
-        important_section = value_score >= 3.2 or any(
-            keyword in text
-            for keyword in ["最终结果", "执行计划", "架构", "流程", "工作流", "结果", "Plan", "Execute", "Agent"]
+        return VisualFrameSelector(VisualScreenshotAgent.visual_keyword_score).needs_balanced_review(
+            segments,
+            heuristic_best,
+            section_title=section_title,
+            section_context=section_context,
         )
-        if important_section and len(segments) >= 2:
-            return True
-
-        ranked = sorted(
-            [segment.representative for segment in segments],
-            key=lambda item: item.score,
-            reverse=True,
-        )
-        if len(ranked) < 2:
-            return False
-        score_gap = ranked[0].score - ranked[1].score
-        best_is_not_raw_top = ranked[0].path != heuristic_best.path
-        ambiguous = score_gap <= float(os.getenv("SCREENSHOT_BALANCED_REVIEW_SCORE_GAP", "0.12"))
-        return ambiguous or best_is_not_raw_top
 
     def can_use_vision_review(self, review_mode: str, gpt: Optional[GPT]) -> bool:
         if review_mode == "off":
@@ -1773,114 +1369,12 @@ class VisualScreenshotAgent:
         transcript_segments: Optional[List[Any]] = None,
         visual_inventory: Optional[List[VisualSceneCandidate]] = None,
     ) -> List[VisualSectionAnalysis]:
-        lines = markdown.splitlines()
-        markers = self.content_line_markers(markdown)
-        if not markers:
-            markers = self.heading_line_markers_from_screenshots(markdown)
-        transcript_windows = self.transcript_segments_to_windows(transcript_segments)
-        if not markers and transcript_windows:
-            markers = self.infer_section_markers_from_headings(markdown, duration, transcript_windows)
-        if not markers:
-            logger.info("No usable timestamp markers or transcript alignment; skip document-driven screenshot planning")
-            return []
-
-        analyses: List[VisualSectionAnalysis] = []
-        total_duration = int(duration or 0)
-        for idx, (line_index, start) in enumerate(markers):
-            next_line = markers[idx + 1][0] if idx + 1 < len(markers) else len(lines)
-            next_time = markers[idx + 1][1] if idx + 1 < len(markers) else total_duration
-            if next_time <= start:
-                next_time = start + 60
-
-            title = self.clean_heading_title(lines[line_index] if line_index < len(lines) else "")
-            body = "\n".join(lines[line_index:next_line])
-            aligned_start, aligned_end, aligned_context, alignment_score = self.align_section_to_transcript(
-                title,
-                body,
-                transcript_windows,
-                start,
-                next_time,
-            )
-            if alignment_score >= 0.18 and start <= aligned_start < next_time:
-                start = aligned_start
-                next_time = max(start + 1, next_time)
-            score, reasons = self.visual_keyword_score(f"{title}\n{body}")
-            section_scenes = self.visual_scenes_for_section(visual_inventory or [], start, next_time)
-            strong_visual_scenes = [
-                scene for scene in section_scenes
-                if scene.score >= float(os.getenv("VISUAL_INVENTORY_SECTION_MIN_SCORE", "0.42"))
-            ]
-
-            if re.search(r"```|`[^`]+`", body):
-                score += 1.3
-                reasons.append("code-block")
-            if title and any(word in title for word in ["目录", "总结", "AI总结", "参考", "结论"]):
-                score -= 2.0
-            if alignment_score >= 0.18:
-                score += min(1.2, alignment_score * 2.0)
-                reasons.append("transcript-align")
-            if strong_visual_scenes:
-                score += min(2.0, len(strong_visual_scenes) * 0.5)
-                reasons.append("visual-inventory")
-                for scene in strong_visual_scenes[:3]:
-                    reasons.extend(scene.reasons[:2])
-
-            if score < 2.0 and not strong_visual_scenes:
-                continue
-
-            explicit_times = [
-                ts for _marker, ts in extract_screenshot_timestamps(body)
-                if self.timestamp_in_window(ts, start, next_time)
-            ]
-            inventory_times = [scene.representative_ts for scene in strong_visual_scenes]
-            screenshot_times = sorted(set(explicit_times + inventory_times))
-            code_block_count = max(0, body.count("```") // 2)
-            subsection_count = len(re.findall(r"^#{3,6}\s+", body, flags=re.MULTILINE))
-            step_count = len(re.findall(r"^\s*(?:[-*+]|\d+[.)])\s+", body, flags=re.MULTILINE))
-            suggested_count = self.suggested_screenshot_count(
-                score,
-                screenshot_times,
-            code_block_count,
-            subsection_count,
-            step_count,
-            visual_candidate_count=len(strong_visual_scenes),
-            body_line_count=len([line for line in body.splitlines() if line.strip()]),
+        return self.document_planner().analyze_sections(
+            markdown,
+            duration,
+            transcript_segments,
+            visual_inventory=visual_inventory,
         )
-            visual_line_times = self.map_visual_lines_to_times(
-                lines,
-                line_index,
-                next_line,
-                start,
-                next_time,
-                suggested_count,
-                transcript_windows=transcript_windows,
-                visual_scenes=strong_visual_scenes,
-            )
-            if visual_line_times and not screenshot_times:
-                suggested_count = min(suggested_count, len(visual_line_times))
-                visual_line_times = visual_line_times[:suggested_count]
-            insert_lines = [line_idx for line_idx, _ts in visual_line_times]
-            if not insert_lines:
-                insert_lines = self.choose_section_insert_lines(lines, line_index, next_line, suggested_count)
-            inventory_context = self.format_visual_inventory_context(strong_visual_scenes)
-            analyses.append(VisualSectionAnalysis(
-                title=title,
-                line_index=line_index,
-                start=start,
-                end=next_time,
-                score=score,
-                reasons=reasons[:6],
-                screenshot_times=screenshot_times,
-                suggested_count=suggested_count,
-                body=(
-                    body
-                    + ("\n\n相关字幕：\n" + aligned_context if aligned_context else "")
-                    + ("\n\n可用视频画面：\n" + inventory_context if inventory_context else "")
-                ),
-                insert_lines=insert_lines,
-                visual_line_times=visual_line_times,
-            ))
-        return analyses
 
     @classmethod
     def infer_section_markers_from_headings(
@@ -1921,99 +1415,12 @@ class VisualScreenshotAgent:
         transcript_segments: Optional[List[Any]] = None,
         visual_inventory: Optional[List[VisualSceneCandidate]] = None,
     ) -> List[VisualSectionPlan]:
-        analyses = self.analyze_markdown_sections(
+        return self.document_planner().plan(
             markdown,
             duration,
             transcript_segments,
             visual_inventory=visual_inventory,
         )
-        if not analyses:
-            return []
-
-        plans: List[VisualSectionPlan] = []
-        total_duration = int(duration or 0)
-        for analysis in analyses:
-            section_anchor_times = self.section_anchor_times(
-                analysis.start,
-                analysis.end,
-                analysis.suggested_count,
-            )
-            if analysis.screenshot_times:
-                anchor_source = (
-                    analysis.screenshot_times
-                    if len(analysis.screenshot_times) >= analysis.suggested_count
-                    else analysis.screenshot_times + section_anchor_times
-                )
-                anchor_times = self.spread_anchor_times(
-                    anchor_source,
-                    analysis.suggested_count,
-                    min_gap=self.adaptive_min_gap(
-                        analysis.start,
-                        analysis.end,
-                        analysis.suggested_count,
-                        len(analysis.screenshot_times),
-                    ),
-                )
-            else:
-                anchor_times = section_anchor_times
-
-            if analysis.visual_line_times and not analysis.screenshot_times:
-                anchor_times = [ts for _line, ts in analysis.visual_line_times[:analysis.suggested_count]]
-
-            for anchor_idx, anchor_time in enumerate(anchor_times):
-                ts = anchor_time
-                if total_duration:
-                    ts = max(1, min(total_duration - 1, ts))
-                plan_end = anchor_times[anchor_idx + 1] if anchor_idx + 1 < len(anchor_times) else analysis.end
-                if total_duration:
-                    plan_end = max(ts + 1, min(total_duration - 1, plan_end))
-                insert_line = (
-                    analysis.insert_lines[min(anchor_idx, len(analysis.insert_lines) - 1)]
-                    if analysis.insert_lines
-                    else None
-                )
-                plans.append(VisualSectionPlan(
-                    title=analysis.title,
-                    start=ts,
-                    end=plan_end,
-                    score=analysis.score,
-                    reasons=analysis.reasons,
-                    line_index=analysis.line_index,
-                    section_start=analysis.start,
-                    section_end=analysis.end,
-                    context=analysis.body[:1800],
-                    insert_line=insert_line,
-                    insert_reason="document-anchor" if analysis.visual_line_times else "document-section",
-                ))
-
-        filtered: List[VisualSectionPlan] = []
-        plan_limit = screenshot_content_budget(analyses)
-        analysis_by_line = {analysis.line_index: analysis for analysis in analyses}
-        for plan in sorted(plans, key=lambda item: (-item.score, item.start)):
-            analysis = analysis_by_line.get(plan.line_index)
-            min_gap = (
-                self.adaptive_min_gap(
-                    analysis.start,
-                    analysis.end,
-                    analysis.suggested_count,
-                    len(analysis.screenshot_times),
-                )
-                if analysis
-                else 24
-            )
-            if any(abs(plan.start - kept.start) < min_gap for kept in filtered):
-                continue
-            filtered.append(plan)
-            if len(filtered) >= plan_limit:
-                break
-
-        filtered.sort(key=lambda item: item.start)
-        logger.info(
-            "Section-driven screenshot plan completed: %s",
-            [{"title": item.title, "start": item.start, "score": round(item.score, 2), "reasons": item.reasons}
-             for item in filtered],
-        )
-        return filtered
 
     @staticmethod
     def visual_scenes_for_section(
@@ -2045,6 +1452,16 @@ class VisualScreenshotAgent:
             )
         return "\n".join(lines)
 
+    def select_screenshot_candidate(
+        self,
+        request: ScreenshotCandidateSelectionRequest,
+    ) -> ScreenshotCandidateSelectionResult:
+        if request.review_candidates is None:
+            request.review_candidates = self.review_screenshot_candidates
+        if request.reserve_vision_review is None:
+            request.reserve_vision_review = self.reserve_vision_review
+        return self.frame_selector.select_near_timestamp(request)
+
     def best_screenshot_near_timestamp(
         self,
         video_path: Path,
@@ -2058,138 +1475,23 @@ class VisualScreenshotAgent:
         section_context: str = "",
         generated_image_paths: Optional[List[str]] = None,
     ) -> Optional[FrameCandidate]:
-        total_duration = int(duration or 0)
-        max_candidates = _env_int("SCREENSHOT_CANDIDATE_LIMIT", 10, 5, 16)
-        offsets = [0, 6, 12, 18, 26, 34, 45, 60]
-        if search_end and search_end > timestamp:
-            span = search_end - timestamp
-            sampled_span = min(span, 150)
-            offsets.extend([
-                max(0, int(sampled_span * ratio))
-                for ratio in (0.45, 0.65, 0.82, 0.94)
-            ])
-            offsets.append(max(0, min(span - 2, sampled_span)))
-        else:
-            remaining = max(0, total_duration - timestamp - 1) if total_duration else 90
-            sampled_span = min(remaining, 120)
-            offsets.extend([
-                max(0, int(sampled_span * ratio))
-                for ratio in (0.5, 0.72, 0.9)
-            ])
-        candidates: List[FrameCandidate] = []
-        seen_ts = set()
-        max_ts = total_duration - 1 if total_duration else None
-        if search_end and search_end > timestamp:
-            upper_bound = max(timestamp, int(search_end) - 1)
-            max_ts = min(max_ts, upper_bound) if max_ts is not None else upper_bound
-        for offset_idx, offset in enumerate(self.select_candidate_offsets(offsets, max_candidates)):
-            ts = timestamp + offset
-            if max_ts is not None:
-                ts = max(1, min(max_ts, ts))
-            else:
-                ts = max(1, ts)
-            if ts in seen_ts:
-                continue
-            seen_ts.add(ts)
-            img_path = self.screenshot_func(str(video_path), str(self.image_output_dir), ts, index * 10 + offset_idx)
-            if not Path(img_path).exists():
-                continue
-            if generated_image_paths is not None:
-                generated_image_paths.append(img_path)
-            exact_hash = visual_reader._calculate_file_md5(img_path)
-            score, perceptual_hash = visual_reader._score_frame(img_path)
-            penalty = self.non_note_frame_penalty(img_path, ts, duration)
-            if penalty:
-                score = max(0.0, score - penalty)
-            candidates.append(FrameCandidate(
-                path=img_path,
-                timestamp=ts,
-                score=score,
-                exact_hash=exact_hash,
-                perceptual_hash=perceptual_hash,
-            ))
-
-        if not candidates:
-            raise RuntimeError(f"未生成可用截图候选: {timestamp}")
-
-        build_segments = getattr(visual_reader, "_build_visual_segments", None)
-        if build_segments:
-            segments = build_segments(candidates)
-        else:
-            segments = [
-                type("_SingleFrameSegment", (), {
-                    "start": candidate.timestamp,
-                    "end": candidate.timestamp,
-                    "representative": candidate,
-                    "frames": [candidate],
-                    "duration": 0,
-                })()
-                for candidate in candidates
-            ]
-        if not segments:
-            raise RuntimeError(f"未生成可用视觉分段: {timestamp}")
-
-        first_ts = min(segment.start for segment in segments)
-        last_ts = max(segment.end for segment in segments)
-        best_raw_score = max(segment.representative.score for segment in segments)
-
-        def selection_score(segment) -> float:
-            candidate = segment.representative
-            later_ratio = 0.0 if last_ts <= first_ts else (segment.end - first_ts) / (last_ts - first_ts)
-            stable_bonus = min(len(segment.frames) - 1, 5) * 0.08 + min(segment.duration / 24, 1) * 0.16
-            singleton_penalty = 0.24 if len(segment.frames) == 1 and len(segments) > 1 else 0.0
-            early_penalty = 0.16 if later_ratio < 0.2 and len(segments) > 1 else 0.0
-            completeness_bonus = 0.0
-            if candidate.score >= max(0.34, best_raw_score - 0.30):
-                completeness_bonus += later_ratio * 0.38
-                if len(segment.frames) > 1 and later_ratio >= 0.45:
-                    completeness_bonus += 0.18
-                if later_ratio >= 0.72:
-                    completeness_bonus += 0.10
-            raw_score_gap_penalty = max(0.0, best_raw_score - candidate.score - 0.26) * 0.65
-            return (
-                candidate.score
-                + stable_bonus
-                + completeness_bonus
-                - singleton_penalty
-                - early_penalty
-                - raw_score_gap_penalty
-            )
-
-        heuristic_best = max(segments, key=selection_score).representative
-        review_mode = screenshot_review_mode()
-        has_vision_reviewer = False
-        reviewed_best = None
-        should_review = review_mode in {"assist", "strict"} or (
-            review_mode == "balanced"
-            and self.needs_balanced_review(
-                segments,
-                heuristic_best,
+        selection = self.select_screenshot_candidate(
+            ScreenshotCandidateSelectionRequest(
+                video_path=video_path,
+                timestamp=timestamp,
+                duration=duration,
+                index=index,
+                visual_reader=visual_reader,
+                image_output_dir=self.image_output_dir,
+                screenshot_func=self.screenshot_func,
+                search_end=search_end,
+                gpt=gpt,
                 section_title=section_title,
                 section_context=section_context,
+                generated_image_paths=generated_image_paths,
             )
         )
-        if should_review:
-            has_vision_reviewer = self.reserve_vision_review(review_mode, gpt)
-            if has_vision_reviewer:
-                reviewed_best = self.review_screenshot_candidates(
-                    candidates,
-                    gpt,
-                    section_title=section_title,
-                    section_context=section_context,
-                )
-        if review_mode == "strict" and not has_vision_reviewer:
-            raise RuntimeError("多模态截图评审不可用")
-        if review_mode == "strict" and has_vision_reviewer and reviewed_best is None:
-            raise RuntimeError("多模态截图评审未返回可用结果")
-        best = reviewed_best or heuristic_best
-        for candidate in candidates:
-            if candidate.path != best.path:
-                Path(candidate.path).unlink(missing_ok=True)
-        if best.score < 0.34:
-            Path(best.path).unlink(missing_ok=True)
-            raise RuntimeError(f"截图候选质量过低: {best.score:.3f}")
-        return best
+        return selection.candidate
 
     @staticmethod
     def fallback_sampling_interval(duration: Optional[float]) -> int:

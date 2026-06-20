@@ -1,9 +1,12 @@
-import { ExternalLink } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { ExternalLink, ImageOff } from 'lucide-react'
 import type { AudioMeta } from '@/store/taskStore'
+import { buildCoverImageSources } from '@/utils/coverImage'
 
 interface VideoBannerProps {
   audioMeta?: AudioMeta
   videoUrl?: string
+  fallbackMarkdown?: string
 }
 
 const platformLabel: Record<string, string> = {
@@ -13,12 +16,18 @@ const platformLabel: Record<string, string> = {
   xiaohongshu: '小红书',
 }
 
-export default function VideoBanner({ audioMeta, videoUrl }: VideoBannerProps) {
+export default function VideoBanner({ audioMeta, videoUrl, fallbackMarkdown }: VideoBannerProps) {
+  const [sourceIndex, setSourceIndex] = useState(0)
+  const coverSources = buildCoverImageSources(audioMeta, fallbackMarkdown)
+  const sourceKey = coverSources.join('\n')
+
+  useEffect(() => {
+    setSourceIndex(0)
+  }, [sourceKey])
+
   if (!audioMeta) return null
 
-  const rawCover = audioMeta.cover_url
-  const apiBase = String(import.meta.env.VITE_API_BASE_URL || 'api').replace(/\/$/, '')
-  const coverUrl = rawCover ? `${apiBase}/image_proxy?url=${encodeURIComponent(rawCover)}` : ''
+  const coverUrl = coverSources[sourceIndex] || ''
   const title = audioMeta.title
   const uploader = audioMeta.raw_info?.uploader || ''
   const platform = platformLabel[audioMeta.platform] || audioMeta.platform || ''
@@ -30,12 +39,16 @@ export default function VideoBanner({ audioMeta, videoUrl }: VideoBannerProps) {
         {coverUrl ? (
           <img
             src={coverUrl}
-            alt={title}
+            alt="视频封面"
             referrerPolicy="no-referrer"
             className="h-full w-full object-cover"
+            onError={() => setSourceIndex(index => index + 1)}
           />
         ) : (
-          <span className="text-xs text-neutral-400">VideoNote</span>
+          <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-neutral-100 text-neutral-400">
+            <ImageOff className="h-4 w-4" />
+            <span className="text-[11px]">无封面</span>
+          </div>
         )}
       </div>
 

@@ -165,6 +165,108 @@ class TestVisualEnhancementService(unittest.TestCase):
         self.assertIn("could not be completed", status_updates[-1][2])
         reindex.assert_called_once_with("task-1")
 
+    def test_enhance_saved_note_persists_visual_report(self):
+        VisualEnhancementService = self._load_service()
+
+        class _ScreenshotAgent:
+            def __init__(self):
+                self.last_run_summary = {}
+
+            def insert_screenshots(self, markdown, video_path, duration, gpt, on_markdown_update=None):
+                self.last_run_summary = {
+                    "execution_engine": "langgraph",
+                    "planned_slots": 1,
+                    "successful_slots": 1,
+                    "failed_slots": 0,
+                    "duplicate_slots": 0,
+                    "diagnostics": [],
+                    "slots": [
+                        {
+                            "slot_id": 0,
+                            "mode": "fallback",
+                            "requested_timestamp": 12,
+                            "candidate_timestamp": 18,
+                            "candidate_score": 0.91,
+                            "status": "inserted",
+                            "section": {"title": "Demo Section"},
+                            "image_url": "/static/screenshots/one.jpg",
+                        }
+                    ],
+                }
+                return markdown + "\n![](/static/screenshots/one.jpg)\n"
+
+        with ProjectTempDir() as tmp_dir:
+            result_path = self._write_result(tmp_dir)
+
+            with patch.object(VisualEnhancementService, "_reindex_task"):
+                changed = VisualEnhancementService(
+                    tmp_dir,
+                    screenshot_agent_factory=_ScreenshotAgent,
+                ).enhance_saved_note(
+                    "task-1",
+                    "video.mp4",
+                    60,
+                    "bilibili",
+                    enhance_token="token-1",
+                    generation_token="generation-1",
+                )
+
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(changed)
+        self.assertEqual(payload["visual_report"]["execution_engine"], "langgraph")
+        self.assertEqual(payload["visual_report"]["planned_slots"], 1)
+        self.assertEqual(payload["visual_report"]["slots"][0]["status"], "inserted")
+        self.assertEqual(payload["visual_report"]["slots"][0]["section"]["title"], "Demo Section")
+
+    def test_enhance_saved_note_persists_visual_report_even_without_images(self):
+        VisualEnhancementService = self._load_service()
+
+        class _ScreenshotAgent:
+            def __init__(self):
+                self.last_run_summary = {}
+
+            def insert_screenshots(self, markdown, *_args, **_kwargs):
+                self.last_run_summary = {
+                    "planned_slots": 1,
+                    "successful_slots": 0,
+                    "failed_slots": 1,
+                    "duplicate_slots": 0,
+                    "diagnostics": ["fallback_failed:42:no usable screenshot"],
+                    "slots": [
+                        {
+                            "slot_id": 0,
+                            "mode": "fallback",
+                            "requested_timestamp": 42,
+                            "status": "failed",
+                            "reason": "no usable screenshot",
+                        }
+                    ],
+                }
+                return markdown
+
+        with ProjectTempDir() as tmp_dir:
+            result_path = self._write_result(tmp_dir)
+
+            changed = VisualEnhancementService(
+                tmp_dir,
+                screenshot_agent_factory=_ScreenshotAgent,
+            ).enhance_saved_note(
+                "task-1",
+                "video.mp4",
+                60,
+                "bilibili",
+                enhance_token="token-1",
+                generation_token="generation-1",
+            )
+
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertFalse(changed)
+        self.assertEqual(payload["markdown"], "## Demo\n")
+        self.assertEqual(payload["visual_report"]["failed_slots"], 1)
+        self.assertEqual(payload["visual_report"]["slots"][0]["reason"], "no usable screenshot")
+
     def test_enhance_saved_note_treats_duplicate_slot_skip_as_success(self):
         VisualEnhancementService = self._load_service()
         status_updates = []

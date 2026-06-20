@@ -320,7 +320,7 @@ const NoteForm = () => {
   }
 
   const onSubmit = async (values: NoteFormValues) => {
-    if (isSubmitting) return
+    if (isSubmitting || isGenerating()) return
     const selectedModelConfig = modelList.find(m => m.model_name === values.model_name)
     if (!selectedModelConfig) {
       toast.error('请先选择可用模型')

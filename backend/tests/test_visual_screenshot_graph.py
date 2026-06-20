@@ -148,6 +148,17 @@ class TestVisualScreenshotGraph(unittest.TestCase):
         self.assertNotIn("*Screenshot", state.markdown)
         self.assertEqual(len(state.generated_images), 1)
         self.assertEqual(state.diagnostics, [])
+        summary = agent.summarize_run(state)
+        self.assertEqual(summary["planned_slots"], 1)
+        self.assertEqual(summary["successful_slots"], 1)
+        self.assertEqual(summary["slots"][0]["status"], "inserted")
+        self.assertEqual(summary["slots"][0]["candidate_score"], 0.92)
+        self.assertEqual(
+            summary["slots"][0]["selection"]["selected_timestamp"],
+            summary["slots"][0]["candidate_timestamp"],
+        )
+        self.assertEqual(summary["slots"][0]["selection"]["selected_by"], "heuristic")
+        self.assertEqual(summary["images"][0]["url"].startswith("/static/screenshots/"), True)
 
     def test_real_langgraph_path_cleans_generated_files_on_failure(self):
         from app.services.visual_screenshot_agent import VisualScreenshotAgent, VisualScreenshotState

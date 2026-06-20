@@ -105,6 +105,13 @@ const githubStyleAnchor = (title: string, used: Map<string, number>) => {
   return count > 0 ? `${base}-${count}` : base
 }
 
+const normalizeAnchorSearchText = (value: string) =>
+  decodeURIComponent(value || '')
+    .replace(/content-\[((?:\d{2}:)?\d{2}:\d{2})\]/gi, '$1')
+    .replace(/原片(?:\s*[（(]?\s*(?:\d{2}:)?\d{2}:\d{2}\s*[）)]?)?/g, '')
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+    .toLowerCase()
+
 const extractMarkdownTocHeadings = (markdown: string) => {
   const headings: string[] = []
   let inFence = false
@@ -360,13 +367,11 @@ function createMarkdownComponents(baseURL: string) {
           // LLM 生成的目录锚点可能和 heading 实际文本不完全一致
           //（例如 heading 带 *Content-[00:00]* 后缀，目录链接里没有）
           if (!target) {
-            const normalize = (s: string) =>
-              s.replace(/[-：:\s*\[\]]/g, '').toLowerCase()
-            const search = normalize(id)
+            const search = normalizeAnchorSearchText(id)
             const headings = document.querySelectorAll('h1, h2, h3, h4, h5, h6')
             for (const h of headings) {
-              const text = h.textContent || ''
-              if (normalize(text).includes(search) || search.includes(normalize(text))) {
+              const text = normalizeAnchorSearchText(h.textContent || '')
+              if (text && search && (text.includes(search) || search.includes(text))) {
                 target = h
                 break
               }
@@ -865,6 +870,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                       <VideoBanner
                         audioMeta={currentTask?.audioMeta}
                         videoUrl={currentTask?.formData?.video_url}
+                        fallbackMarkdown={displayContent}
                       />
                     </div>
                     <div className="markdown-body mx-auto w-full max-w-5xl px-5 pb-10">

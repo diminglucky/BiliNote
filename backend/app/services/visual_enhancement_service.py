@@ -185,9 +185,11 @@ class VisualEnhancementService:
             if not self._matches_token(latest_payload, enhance_token, generation_token):
                 logger.info("Skip stale visual enhancement writeback (task_id=%s)", task_id)
                 return False
+            self._attach_visual_report(latest_payload, screenshot_summary)
 
             latest_markdown = latest_payload.get("markdown") or ""
             if inserted_count > 0 and latest_markdown != markdown and (not enhanced or enhanced == markdown):
+                self._atomic_write_json(result_path, latest_payload)
                 self._reindex_task(task_id)
                 final_status, final_message = self._completion_status(
                     screenshot_summary,
@@ -215,6 +217,7 @@ class VisualEnhancementService:
                         "Note is ready, but screenshot enhancement did not find a usable image",
                     )
                 )
+                self._atomic_write_json(result_path, latest_payload)
                 self._update_status_if_current(
                     result_path,
                     enhance_token,
@@ -228,6 +231,7 @@ class VisualEnhancementService:
                 return False
 
             latest_payload["markdown"] = normalize_markdown_toc(enhanced) or enhanced
+            self._attach_visual_report(latest_payload, screenshot_summary)
             self._atomic_write_json(result_path, latest_payload)
             self._write_markdown_cache(task_id, latest_payload["markdown"])
             self._reindex_task(task_id)
@@ -278,13 +282,21 @@ class VisualEnhancementService:
 
         state = getattr(agent, "last_run_state", None)
         if state is not None:
-            self._last_screenshot_summary = {
+            summary = dict(getattr(state, "visual_report", None) or {})
+            summary.update({
                 "planned_slots": int(getattr(state, "planned_slot_count", 0) or 0),
                 "successful_slots": int(getattr(state, "successful_slot_count", 0) or 0),
                 "failed_slots": int(getattr(state, "failed_slot_count", 0) or 0),
                 "duplicate_slots": int(getattr(state, "duplicate_slot_count", 0) or 0),
                 "diagnostics": list(getattr(state, "diagnostics", None) or []),
-            }
+            })
+            self._last_screenshot_summary = summary
+
+    @staticmethod
+    def _attach_visual_report(payload: dict[str, Any], summary: dict[str, Any]) -> None:
+        if not summary:
+            return
+        payload["visual_report"] = summary
 
     @staticmethod
     def _completion_status(summary: dict[str, Any], inserted_count: int) -> tuple[str, str]:

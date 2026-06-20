@@ -61,6 +61,7 @@ class NoteQualityReport:
     stage_timings: list[StageTiming]
     images: list[ImageQualityReport]
     issues: list[str]
+    visual_report: dict[str, Any] = field(default_factory=dict)
     generated_at: float = field(default_factory=time.time)
 
     @property
@@ -84,6 +85,9 @@ def load_task_report(
     markdown = str(payload.get("markdown") or "")
     audio_meta = payload.get("audio_meta") or {}
     transcript = payload.get("transcript") or {}
+    visual_report = payload.get("visual_report") or {}
+    if not isinstance(visual_report, dict):
+        visual_report = {}
     transcript_segments = transcript.get("segments") or []
     if not isinstance(transcript_segments, list):
         transcript_segments = []
@@ -118,6 +122,7 @@ def load_task_report(
         issues.append(f"partial-success:{message}" if message else "partial-success")
     if payload.get("enhance_token") and status_payload.get("status") == "SUCCESS" and not images:
         issues.append("screenshot-enhancement-finished-without-images")
+    issues.extend(collect_visual_report_issues(visual_report))
 
     return NoteQualityReport(
         task_id=task_id,
@@ -136,6 +141,7 @@ def load_task_report(
         stage_timings=stage_timings,
         images=images,
         issues=issues,
+        visual_report=visual_report,
     )
 
 
@@ -333,6 +339,36 @@ def collect_note_issues(
             if source_limited_screenshots and issue == "low-resolution":
                 continue
             issues.append(f"image:{Path(image.path or image.url).name}:{issue}")
+    return issues
+
+
+def collect_visual_report_issues(visual_report: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    visual_planned = int(visual_report.get("planned_slots") or 0)
+    visual_successful = int(visual_report.get("successful_slots") or 0)
+    if visual_planned > 0 and visual_successful <= 0:
+        issues.append("visual-report-no-successful-screenshots")
+
+    slots = visual_report.get("slots") or []
+    if not isinstance(slots, list):
+        return issues
+
+    for slot in slots:
+        if not isinstance(slot, dict):
+            continue
+        slot_id = slot.get("slot_id", "?")
+        selection = slot.get("selection") or {}
+        if not isinstance(selection, dict):
+            continue
+        candidate_count = int(selection.get("candidate_count") or 0)
+        if candidate_count == 1:
+            issues.append(f"visual-slot:{slot_id}:single-candidate-selection")
+        selected_score = _safe_float(selection.get("selected_score"))
+        if selected_score is not None and selected_score < 0.42:
+            issues.append(f"visual-slot:{slot_id}:low-selected-score:{selected_score:.3f}")
+        review_mode = str(selection.get("review_mode") or "")
+        if review_mode == "strict" and not selection.get("review_used"):
+            issues.append(f"visual-slot:{slot_id}:strict-review-not-used")
     return issues
 
 

@@ -16,6 +16,7 @@ export interface TaskStatusResponse {
     markdown?: string
     transcript?: any
     audio_meta?: any
+    visual_report?: any
   }
 }
 

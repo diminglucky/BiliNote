@@ -43,7 +43,7 @@ export const useTaskPolling = (interval = 3000, enabled = true) => {
 
         const nextGenerationToken = res.generation_token || latestTask.generationToken
         if (res.result) {
-          const { markdown, transcript, audio_meta } = res.result
+          const { markdown, transcript, audio_meta, visual_report } = res.result
           if (isSuccessTaskStatus(status) && !isSuccessTaskStatus(latestTask.status)) {
             toast.success('笔记生成成功')
           }
@@ -51,7 +51,17 @@ export const useTaskPolling = (interval = 3000, enabled = true) => {
             toast('正文已生成，但截图增强没有完全完成', { icon: '!' })
           }
           const latestMarkdown = latestMarkdownContent(latestTask.markdown)
-          if (status !== latestTask.status || message !== latestTask.message || markdown !== latestMarkdown) {
+          const visualReportChanged =
+            JSON.stringify(visual_report ?? null) !== JSON.stringify(latestTask.visualReport ?? null)
+          const audioMetaChanged =
+            JSON.stringify(audio_meta ?? null) !== JSON.stringify(latestTask.audioMeta ?? null)
+          if (
+            status !== latestTask.status ||
+            message !== latestTask.message ||
+            markdown !== latestMarkdown ||
+            visualReportChanged ||
+            audioMetaChanged
+          ) {
             updateTaskContent(task.id, {
               status,
               message,
@@ -59,6 +69,7 @@ export const useTaskPolling = (interval = 3000, enabled = true) => {
               markdown,
               transcript,
               audioMeta: audio_meta,
+              visualReport: visual_report,
             })
           }
           return

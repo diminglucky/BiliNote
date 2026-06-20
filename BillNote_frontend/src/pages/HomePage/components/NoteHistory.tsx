@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/tooltip.tsx'
 import LazyImage from '@/components/LazyImage.tsx'
 import { FC, useEffect, useMemo, useState } from 'react'
+import { buildCoverImageSources } from '@/utils/coverImage'
 import {
   isFailedTaskStatus,
   isPartialSuccessTaskStatus,
@@ -27,7 +28,6 @@ interface NoteHistoryProps {
 const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
   const tasks = useTaskStore(state => state.tasks)
   const removeTask = useTaskStore(state => state.removeTask)
-  const baseURL = (String(import.meta.env.VITE_API_BASE_URL || 'api')).replace(/\/$/, '')
   const [rawSearch, setRawSearch] = useState('')
   const [search, setSearch] = useState('')
   const fuse = useMemo(() => new Fuse(tasks, {
@@ -89,31 +89,30 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
         </div>
       </div>
       <div className="flex flex-col gap-1.5 overflow-hidden">
-        {filteredTasks.map(task => (
-          <div
-            key={task.id}
-            onClick={() => onSelect(task.id)}
-            className={cn(
-              'group flex cursor-pointer flex-col rounded-md border border-transparent bg-white px-2.5 py-2 transition hover:border-neutral-200 hover:bg-neutral-50',
-              selectedId === task.id && 'border-neutral-300 bg-neutral-100 hover:bg-neutral-100'
-            )}
-          >
+        {filteredTasks.map(task => {
+          const coverSources = buildCoverImageSources(task.audioMeta, task.markdown[0]?.content)
+
+          return (
+            <div
+              key={task.id}
+              onClick={() => onSelect(task.id)}
+              className={cn(
+                'group flex cursor-pointer flex-col rounded-md border border-transparent bg-white px-2.5 py-2 transition hover:border-neutral-200 hover:bg-neutral-50',
+                selectedId === task.id && 'border-neutral-300 bg-neutral-100 hover:bg-neutral-100'
+              )}
+            >
             <div className="flex items-center gap-3">
               {task.platform === 'local' ? (
                 <img
                   src={
-                    task.audioMeta.cover_url ? `${task.audioMeta.cover_url}` : '/placeholder.png'
+                    coverSources[0] || '/placeholder.png'
                   }
                   alt="封面"
                   className="h-11 w-16 rounded-md object-cover"
                 />
               ) : (
                 <LazyImage
-                  src={
-                    task.audioMeta.cover_url
-                      ? `${baseURL}/image_proxy?url=${encodeURIComponent(task.audioMeta.cover_url)}`
-                      : '/placeholder.png'
-                  }
+                  src={coverSources.length > 0 ? coverSources : '/placeholder.png'}
                   alt="封面"
                 />
               )}
@@ -185,7 +184,8 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
               </div>
             </div>
           </div>
-        ))}
+          )
+        })}
       </div>
     </>
   )

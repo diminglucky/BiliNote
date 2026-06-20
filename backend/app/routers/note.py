@@ -21,7 +21,7 @@ from app.utils.response import ResponseWrapper as R
 from app.utils.url_parser import extract_video_id
 from app.utils.task_status_writer import write_status_record
 from app.validators.video_url_validator import is_supported_video_url
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response
 import httpx
 from app.enmus.task_status_enums import TaskStatus
 from app.agents.note_agents import (
@@ -109,6 +109,7 @@ def save_note_to_file(
 ):
     os.makedirs(NOTE_OUTPUT_DIR, exist_ok=True)
     payload = note_to_json_payload(note)
+    _normalize_result_payload(payload)
     if enhance_token:
         payload["enhance_token"] = enhance_token
     if generation_token:
@@ -175,6 +176,57 @@ def _update_enhancement_status_if_current(
     )
 
 
+def _extract_cover_url_from_audio_meta(audio_meta: dict) -> str:
+    if not isinstance(audio_meta, dict):
+        return ""
+
+    raw_info = audio_meta.get("raw_info") or {}
+    candidates = [
+        audio_meta.get("cover_url"),
+        raw_info.get("thumbnail"),
+        raw_info.get("cover_url"),
+        raw_info.get("coverUrl"),
+        raw_info.get("cover"),
+        raw_info.get("pic"),
+        raw_info.get("image"),
+        raw_info.get("thumbnail_url"),
+    ]
+
+    thumbnails = raw_info.get("thumbnails")
+    if isinstance(thumbnails, list):
+        for item in thumbnails:
+            if isinstance(item, dict):
+                candidates.append(item.get("url"))
+            else:
+                candidates.append(item)
+
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
+
+
+def _normalize_audio_meta_cover(audio_meta: dict) -> dict:
+    if not isinstance(audio_meta, dict):
+        return audio_meta
+
+    cover_url = _extract_cover_url_from_audio_meta(audio_meta)
+    if cover_url:
+        audio_meta["cover_url"] = cover_url
+        raw_info = audio_meta.get("raw_info")
+        if isinstance(raw_info, dict) and not raw_info.get("thumbnail"):
+            raw_info["thumbnail"] = cover_url
+    return audio_meta
+
+
+def _normalize_result_payload(payload: dict) -> dict:
+    if isinstance(payload, dict):
+        audio_meta = payload.get("audio_meta")
+        if isinstance(audio_meta, dict):
+            payload["audio_meta"] = _normalize_audio_meta_cover(audio_meta)
+    return payload
+
+
 def _recover_result_from_cache(task_id: str, generation_token: Optional[str] = None) -> bool:
     result_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json")
     status_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.status.json")
@@ -224,6 +276,7 @@ def _recover_result_from_cache(task_id: str, generation_token: Optional[str] = N
     audio_meta = _load_json_file_safely(audio_path, retries=1)
     if not isinstance(transcript, dict) or not isinstance(audio_meta, dict):
         return False
+    _normalize_audio_meta_cover(audio_meta)
 
     try:
         with open(markdown_path, "r", encoding="utf-8") as f:
@@ -548,6 +601,7 @@ def get_task_status(task_id: str, generation_token: Optional[str] = None):
         result_generation_token = result_content.get("generation_token")
         if generation_token and result_generation_token != generation_token:
             return _pending_for_generation()
+        _normalize_result_payload(result_content)
         return R.success({
             "status": status_value,
             "result": result_content,
@@ -624,26 +678,44 @@ def get_task_status(task_id: str, generation_token: Optional[str] = None):
 
 @router.get("/image_proxy")
 async def image_proxy(request: Request, url: str):
+    if url.startswith("/"):
+        local_path = Path(url.lstrip("/"))
+        if local_path.exists() and local_path.is_file():
+            from fastapi.responses import FileResponse
+
+            return FileResponse(local_path)
+
+    parsed_url = urlparse(url)
+    if parsed_url.scheme not in {"http", "https"}:
+        raise HTTPException(status_code=400, detail="仅支持代理 http/https 图片")
+
     headers = {
         "Referer": "https://www.bilibili.com/",
-        "User-Agent": request.headers.get("User-Agent", ""),
+        "User-Agent": request.headers.get("User-Agent") or (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
             resp = await client.get(url, headers=headers)
 
             if resp.status_code != 200:
-                raise HTTPException(status_code=resp.status_code, detail="图片获取失败")
+                raise HTTPException(status_code=resp.status_code, detail=f"图片获取失败: {resp.status_code}")
 
             content_type = resp.headers.get("Content-Type", "image/jpeg")
-            return StreamingResponse(
-                resp.aiter_bytes(),
+            return Response(
+                content=resp.content,
                 media_type=content_type,
                 headers={
                     "Cache-Control": "public, max-age=86400",  #  缓存一天
                     "Content-Type": content_type,
                 }
             )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

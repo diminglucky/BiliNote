@@ -35,7 +35,13 @@ class ProjectTempDir:
 
 
 class TestNoteQualityBenchmark(unittest.TestCase):
-    def _write_task_payload(self, note_dir: pathlib.Path, task_id: str, markdown: str) -> None:
+    def _write_task_payload(
+        self,
+        note_dir: pathlib.Path,
+        task_id: str,
+        markdown: str,
+        visual_report: dict | None = None,
+    ) -> None:
         (note_dir / f"{task_id}.json").write_text(
             json.dumps(
                 {
@@ -57,6 +63,7 @@ class TestNoteQualityBenchmark(unittest.TestCase):
                     },
                     "generation_token": "generation-1",
                     "enhance_token": "enhance-1",
+                    "visual_report": visual_report or {},
                 },
                 ensure_ascii=False,
             ),
@@ -298,6 +305,97 @@ class TestNoteQualityBenchmark(unittest.TestCase):
         self.assertEqual(report.low_quality_image_count, 0)
         self.assertFalse(any("low-resolution" in issue for issue in report.issues))
         self.assertTrue(report.pass_quality_gate)
+
+    def test_report_includes_visual_report_and_flags_empty_success(self):
+        with ProjectTempDir() as tmp_dir:
+            root = pathlib.Path(tmp_dir)
+            note_dir = root / "note_results"
+            static_dir = root / "static"
+            note_dir.mkdir()
+            static_dir.mkdir()
+            markdown = (
+                "## Demo Section *Content-[00:00]*\n\n"
+                "This section explains a UI operation that should have produced a screenshot, "
+                "but every planned visual slot failed.\n\n"
+                "## AI Summary\n\n"
+                "Summary text.\n"
+            )
+            visual_report = {
+                "planned_slots": 2,
+                "successful_slots": 0,
+                "failed_slots": 2,
+                "duplicate_slots": 0,
+                "slots": [
+                    {"slot_id": 0, "status": "failed", "reason": "blank frame"},
+                    {"slot_id": 1, "status": "failed", "reason": "duplicate frame"},
+                ],
+            }
+            self._write_task_payload(note_dir, "task-1", markdown, visual_report=visual_report)
+            write_status_record(
+                "task-1",
+                TaskStatus.SUCCESS,
+                generation_token="generation-1",
+                output_dir=note_dir,
+            )
+
+            report = load_task_report("task-1", note_dir, static_dir)
+
+        self.assertEqual(report.visual_report["planned_slots"], 2)
+        self.assertTrue(any(issue == "visual-report-no-successful-screenshots" for issue in report.issues))
+        self.assertFalse(report.pass_quality_gate)
+
+    def test_report_flags_risky_visual_selection_diagnostics(self):
+        with ProjectTempDir() as tmp_dir:
+            root = pathlib.Path(tmp_dir)
+            note_dir = root / "note_results"
+            static_dir = root / "static"
+            note_dir.mkdir()
+            static_dir.mkdir()
+            markdown = (
+                "## Demo Section *Content-[00:00]*\n\n"
+                "This section has enough content and a generated screenshot.\n"
+                "![](/static/screenshots/one.jpg)\n\n"
+                "## AI Summary\n\n"
+                "Summary text.\n"
+            )
+            screenshots_dir = static_dir / "screenshots"
+            screenshots_dir.mkdir()
+            img = Image.new("RGB", (1280, 720), (120, 140, 160))
+            draw = ImageDraw.Draw(img)
+            for row in range(8):
+                draw.text((80, 80 + row * 58), f"Result line {row}", fill="white")
+            img.save(screenshots_dir / "one.jpg", quality=95)
+            visual_report = {
+                "planned_slots": 1,
+                "successful_slots": 1,
+                "failed_slots": 0,
+                "duplicate_slots": 0,
+                "slots": [
+                    {
+                        "slot_id": 0,
+                        "status": "inserted",
+                        "selection": {
+                            "candidate_count": 1,
+                            "selected_score": 0.39,
+                            "review_mode": "strict",
+                            "review_used": False,
+                        },
+                    },
+                ],
+            }
+            self._write_task_payload(note_dir, "task-1", markdown, visual_report=visual_report)
+            write_status_record(
+                "task-1",
+                TaskStatus.SUCCESS,
+                generation_token="generation-1",
+                output_dir=note_dir,
+            )
+
+            report = load_task_report("task-1", note_dir, static_dir)
+
+        self.assertIn("visual-slot:0:single-candidate-selection", report.issues)
+        self.assertIn("visual-slot:0:low-selected-score:0.390", report.issues)
+        self.assertIn("visual-slot:0:strict-review-not-used", report.issues)
 
 
 if __name__ == "__main__":

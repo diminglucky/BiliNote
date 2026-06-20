@@ -51,6 +51,7 @@ export const HomePage: FC = () => {
           markdown: res.result?.markdown,
           transcript: res.result?.transcript,
           audioMeta: res.result?.audio_meta,
+          visualReport: res.result?.visual_report,
         })
       })
       .catch(error => {

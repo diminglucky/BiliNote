@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from 'uuid'
 import toast from 'react-hot-toast'
 import { get, set, del } from 'idb-keyval'
 import type { TaskStatus } from '@/models/taskStateMachine'
+import { resolveCoverUrl } from '@/utils/coverImage'
 
 
 export interface AudioMeta {
@@ -45,6 +46,7 @@ export interface Task {
   platform: string
   markdown: Markdown[]
   transcript: Transcript
+  visualReport?: any
   status: TaskStatus
   message?: string
   audioMeta: AudioMeta
@@ -69,6 +71,16 @@ export interface Task {
 type TaskUpdate = Partial<Omit<Task, 'id' | 'createdAt' | 'markdown'>> & {
   markdown?: Markdown[] | string
 }
+
+const emptyAudioMeta = (): AudioMeta => ({
+  cover_url: '',
+  duration: 0,
+  file_path: '',
+  platform: '',
+  raw_info: null,
+  title: '',
+  video_id: '',
+})
 
 interface TaskStore {
   tasks: Task[]
@@ -142,6 +154,32 @@ const upsertMarkdownVersion = (
   return [markdownVersionFromString(task, content, token), ...versions]
 }
 
+const normalizeAudioMeta = (
+  next?: Partial<AudioMeta> | null,
+  previous?: AudioMeta,
+): AudioMeta => {
+  const merged = {
+    ...emptyAudioMeta(),
+    ...(previous || {}),
+    ...(next || {}),
+    raw_info: {
+      ...(previous?.raw_info || {}),
+      ...(next?.raw_info || {}),
+    },
+  }
+
+  merged.cover_url = resolveCoverUrl(merged) || previous?.cover_url || ''
+  return merged
+}
+
+const mergeTaskUpdate = (task: Task, data: TaskUpdate): TaskUpdate => {
+  if (!data.audioMeta) return data
+  return {
+    ...data,
+    audioMeta: normalizeAudioMeta(data.audioMeta, task.audioMeta),
+  }
+}
+
 export const useTaskStore = create<TaskStore>()(
   persist(
     (set, get) => ({
@@ -158,6 +196,7 @@ export const useTaskStore = create<TaskStore>()(
               generationToken,
               status: 'PENDING',
               markdown: [],
+              visualReport: null,
               platform: platform,
               transcript: {
                 full_text: '',
@@ -167,13 +206,7 @@ export const useTaskStore = create<TaskStore>()(
               },
               createdAt: new Date().toISOString(),
               audioMeta: {
-                cover_url: '',
-                duration: 0,
-                file_path: '',
-                platform: '',
-                raw_info: null,
-                title: '',
-                video_id: '',
+                ...emptyAudioMeta(),
               },
             },
             ...state.tasks,
@@ -185,31 +218,32 @@ export const useTaskStore = create<TaskStore>()(
           set(state => ({
             tasks: state.tasks.map(task => {
               if (task.id !== id) return task
+              const nextData = mergeTaskUpdate(task, data)
 
-              if (typeof data.markdown === 'string') {
+              if (typeof nextData.markdown === 'string') {
                 const prev = normalizeMarkdownVersions(task, task.markdown)
                 const nextMarkdown = upsertMarkdownVersion(
                   task,
                   prev,
-                  data.markdown,
-                  data.generationToken || task.generationToken,
+                  nextData.markdown,
+                  nextData.generationToken || task.generationToken,
                 )
                 if (nextMarkdown === prev) {
-                  const { markdown: _markdown, ...rest } = data
+                  const { markdown: _markdown, ...rest } = nextData
                   return { ...task, ...rest }
                 }
                 return {
                   ...task,
-                  ...data,
+                  ...nextData,
                   markdown: nextMarkdown,
                 }
               }
 
-              if (Array.isArray(data.markdown)) {
-                return { ...task, ...data, markdown: data.markdown }
+              if (Array.isArray(nextData.markdown)) {
+                return { ...task, ...nextData, markdown: nextData.markdown }
               }
 
-              return { ...task, ...data, markdown: normalizeMarkdownVersions(task, task.markdown) }
+              return { ...task, ...nextData, markdown: normalizeMarkdownVersions(task, task.markdown) }
             }),
           })),
 
@@ -239,6 +273,7 @@ export const useTaskStore = create<TaskStore>()(
                     generationToken: undefined,
                     isRetrySubmitting: true,
                     message: '正在提交重新生成请求...',
+                    visualReport: null,
                   }
                   : t
           ),
@@ -344,6 +379,7 @@ export const useTaskStore = create<TaskStore>()(
             tasks: persisted.state.tasks.map((task: Task & { markdown?: Markdown[] | string }) => ({
               ...task,
               markdown: normalizeMarkdownVersions(task, task.markdown),
+              audioMeta: normalizeAudioMeta(task.audioMeta),
             })),
           },
         }
