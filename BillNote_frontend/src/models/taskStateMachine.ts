@@ -48,7 +48,7 @@ export const taskStatusMessage = (status?: string, message?: string) => {
     return '正在逐张插入关键截图，笔记内容会自动更新'
   }
   if (status === 'PARTIAL_SUCCESS') {
-    return '笔记已完成，部分截图未插入'
+    return '笔记已完成，截图未完全完成'
   }
   if (status && status !== 'SUCCESS' && status !== 'FAILED') {
     return '正在重新生成，旧笔记会保留到新版本完成'

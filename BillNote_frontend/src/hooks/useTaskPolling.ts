@@ -48,7 +48,7 @@ export const useTaskPolling = (interval = 3000, enabled = true) => {
             toast.success('笔记生成成功')
           }
           if (isPartialSuccessTaskStatus(status) && latestTask.status !== status) {
-            toast('笔记已完成，部分截图未插入', { icon: '!' })
+            toast(message || '笔记已完成，截图未完全完成', { icon: '!' })
           }
           const latestMarkdown = latestMarkdownContent(latestTask.markdown)
           const visualReportChanged =

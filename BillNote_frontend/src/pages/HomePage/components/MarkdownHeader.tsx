@@ -137,7 +137,7 @@ export function MarkdownHeader({
             )}
             {taskStatus === 'PARTIAL_SUCCESS' && (
               <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-700">
-                已完成，部分截图跳过
+                已完成，截图未完全完成
               </Badge>
             )}
             {visualSummary && (

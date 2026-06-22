@@ -222,8 +222,8 @@ const visualReportSummary = (visualReport: any) => {
   const failed = asCount(visualReport.failed_slots)
   if (!success && !planned && !skipped && !duplicate && !failed) return ''
 
-  const parts = [`截图 ${success} 张`]
-  if (planned) parts.push(`计划 ${planned}`)
+  const parts = success > 0 ? [`截图 ${success} 张`] : []
+  if (planned) parts.push(success > 0 ? `计划 ${planned}` : `计划 ${planned} 个截图位置`)
   if (skipped) parts.push(`跳过 ${skipped}`)
   if (duplicate) parts.push(`去重 ${duplicate}`)
   if (failed) parts.push(`失败 ${failed}`)

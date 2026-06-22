@@ -573,6 +573,50 @@ class TestVisualEnhancementService(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("legacy.jpg", payload["markdown"])
 
+    def test_enhance_saved_note_does_not_retry_agent_value_error_as_legacy_signature(self):
+        VisualEnhancementService = self._load_service()
+        calls = []
+        status_updates = []
+
+        class _StatusWriter:
+            def _update_status(self, task_id, status, message=None):
+                status_updates.append((task_id, getattr(status, "value", status), message))
+
+        class _ScreenshotAgent:
+            def insert_screenshots(
+                self,
+                markdown,
+                video_path,
+                duration,
+                gpt,
+                on_markdown_update=None,
+                transcript_segments=None,
+                on_stage_update=None,
+                on_progress_update=None,
+            ):
+                calls.append((markdown, str(video_path), duration, gpt))
+                raise ValueError("agent internal validation failed")
+
+        with ProjectTempDir() as tmp_dir:
+            self._write_result(tmp_dir)
+
+            VisualEnhancementService(
+                tmp_dir,
+                screenshot_agent_factory=_ScreenshotAgent,
+                status_writer=_StatusWriter(),
+            ).enhance_saved_note(
+                "task-1",
+                "video.mp4",
+                60,
+                "bilibili",
+                enhance_token="token-1",
+                generation_token="generation-1",
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(status_updates[-1][1], "PARTIAL_SUCCESS")
+        self.assertIn("agent internal validation failed", status_updates[-1][2])
+
     def test_incremental_updates_are_preserved_when_agent_returns_none(self):
         VisualEnhancementService = self._load_service()
         status_updates = []

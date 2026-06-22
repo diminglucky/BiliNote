@@ -84,26 +84,21 @@ class VisualEnhancementService:
         method = agent.insert_screenshots
         try:
             signature = inspect.signature(method)
+        except (TypeError, ValueError):
+            signature = None
+
+        if signature is not None:
             parameters = signature.parameters
             accepts_kwargs = any(
                 parameter.kind == inspect.Parameter.VAR_KEYWORD
                 for parameter in parameters.values()
             )
-            supported_callbacks = (
-                callbacks
-                if accepts_kwargs
-                else {
-                    key: value
-                    for key, value in callbacks.items()
-                    if key in parameters
-                }
-            )
+            supported_callbacks = callbacks if accepts_kwargs else {
+                key: value
+                for key, value in callbacks.items()
+                if key in parameters
+            }
             return method(markdown, video_path, duration, gpt, **supported_callbacks)
-        except (TypeError, ValueError) as exc:
-            raw = str(exc)
-            unexpected_kwarg = "unexpected keyword argument" in raw
-            if not unexpected_kwarg and not isinstance(exc, ValueError):
-                raise
 
         try:
             return method(
