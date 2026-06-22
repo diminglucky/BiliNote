@@ -20,7 +20,6 @@ from app.agents import AgentExecutionContext, build_note_execution_plan
 from app.agents.executor import AgentRuntimeContext, PlanExecutor
 from app.agents.note_agents import (
     AgentRuntimeServices,
-    ChatRagAgent,
     MarkdownComposerAgent,
     DownloadAgent,
     NoteWriterAgent,
@@ -188,7 +187,6 @@ class NoteGenerator:
                 video_understanding=video_understanding,
                 video_interval=video_interval,
                 grid_size=grid_size,
-                defer_screenshots=defer_screenshots,
             )
 
             executor = PlanExecutor(
@@ -196,8 +194,6 @@ class NoteGenerator:
                 transcript_agent=self.transcript_agent,
                 note_writer_agent=self.note_writer_agent,
                 markdown_composer_agent=self.markdown_composer_agent,
-                chat_rag_agent=ChatRagAgent(),
-                status_updater=self._update_status,
             )
             runtime_context = executor.run(self.execution_plan, runtime_context)
             markdown = prepend_source_link(runtime_context.markdown or "", str(video_url))

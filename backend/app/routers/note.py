@@ -25,10 +25,9 @@ from fastapi.responses import Response
 import httpx
 from app.enmus.task_status_enums import TaskStatus
 from app.agents.note_agents import (
-    ChatIndexRequest,
-    ChatRagAgent,
     VisualEnhancementAgent,
     VisualEnhancementRequest,
+    index_task_for_chat,
 )
 
 # from app.services.downloader import download_raw_audio
@@ -474,7 +473,7 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
     # 自动建立向量索引（用于 AI 问答），失败不影响笔记生成
     try:
         if _is_current_generation(task_id, generation_token):
-            ChatRagAgent().run(ChatIndexRequest(task_id=task_id))
+            index_task_for_chat(task_id)
     except Exception as e:
         logger.warning(f"向量索引失败（不影响笔记）: {e}")
 

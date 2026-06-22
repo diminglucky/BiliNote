@@ -4,21 +4,15 @@ from typing import Any, Mapping, Optional
 
 
 class AgentRole(str, Enum):
-    ORCHESTRATOR = "orchestrator"
     DOWNLOAD = "download"
     TRANSCRIPT = "transcript"
     NOTE_WRITER = "note_writer"
-    VISUAL_INVENTORY = "visual_inventory"
-    VISUAL_PLANNER = "visual_planner"
-    FRAME_SELECTOR = "frame_selector"
-    VISION_REVIEW = "vision_review"
+    VISUAL_ENHANCEMENT = "visual_enhancement"
     MARKDOWN_COMPOSER = "markdown_composer"
-    CHAT_RAG = "chat_rag"
 
 
 class StepExecutionMode(str, Enum):
     SEQUENTIAL = "sequential"
-    PARALLEL = "parallel"
     BACKGROUND = "background"
 
 

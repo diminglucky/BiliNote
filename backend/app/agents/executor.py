@@ -1,12 +1,10 @@
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from app.agents.base import AgentRole, ExecutionPlan, StepExecutionMode
 from app.agents.note_agents import (
-    ChatIndexRequest,
     DownloadAgent,
     DownloadRequest,
     MarkdownComposeRequest,
@@ -16,12 +14,9 @@ from app.agents.note_agents import (
     TranscriptAgent,
     TranscriptResolveRequest,
 )
-from app.enmus.task_status_enums import TaskStatus
 from app.models.audio_model import AudioDownloadResult
 from app.models.notes_model import NoteResult
 from app.models.transcriber_model import TranscriptResult
-from app.services.visual_inventory_agent import VisualSceneCandidate
-from app.services.visual_screenshot_agent import VisualScreenshotState
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +39,6 @@ class AgentRuntimeContext:
     video_understanding: bool = False
     video_interval: int = 0
     grid_size: list[int] = field(default_factory=list)
-    defer_screenshots: bool = False
     audio_cache_file: Optional[Path] = None
     transcript_cache_file: Optional[Path] = None
     markdown_cache_file: Optional[Path] = None
@@ -53,9 +47,6 @@ class AgentRuntimeContext:
     markdown: Optional[str] = None
     video_path: Optional[Path] = None
     video_img_urls: list[str] = field(default_factory=list)
-    visual_inventory: list[VisualSceneCandidate] = field(default_factory=list)
-    visual_state: Optional[VisualScreenshotState] = None
-    visual_slot_results: list[Any] = field(default_factory=list)
     result: Optional[NoteResult] = None
     diagnostics: list[str] = field(default_factory=list)
 
@@ -78,15 +69,11 @@ class PlanExecutor:
         transcript_agent: TranscriptAgent,
         note_writer_agent: NoteWriterAgent,
         markdown_composer_agent: MarkdownComposerAgent,
-        chat_rag_agent: Optional[Any] = None,
-        status_updater: Optional[Callable[[str, TaskStatus, Optional[str]], None]] = None,
     ):
         self.download_agent = download_agent
         self.transcript_agent = transcript_agent
         self.note_writer_agent = note_writer_agent
         self.markdown_composer_agent = markdown_composer_agent
-        self.chat_rag_agent = chat_rag_agent
-        self.status_updater = status_updater
 
     def run(self, plan: ExecutionPlan, context: AgentRuntimeContext) -> AgentRuntimeContext:
         executed: set[str] = set()
@@ -102,10 +89,7 @@ class PlanExecutor:
                 unresolved = ", ".join(step.step_id for step in pending)
                 raise RuntimeError(f"Agent execution plan has unresolved dependencies: {unresolved}")
 
-            parallel_steps = [step for step in ready if step.mode == StepExecutionMode.PARALLEL]
-            immediate_steps = [step for step in ready if step.mode != StepExecutionMode.PARALLEL]
-
-            for step in immediate_steps:
+            for step in ready:
                 pending.remove(step)
                 try:
                     if step.mode == StepExecutionMode.BACKGROUND:
@@ -119,26 +103,6 @@ class PlanExecutor:
                     context.diagnostics.append(f"{step.step_id}: optional step failed: {exc}")
                     self._mark_dependents_executed(step.step_id, pending, executed, optional_steps)
                 executed.add(step.step_id)
-
-            if parallel_steps:
-                for step in parallel_steps:
-                    pending.remove(step)
-                with ThreadPoolExecutor(max_workers=min(len(parallel_steps), 8)) as executor:
-                    futures = {
-                        executor.submit(self._execute_step, step.step_id, step.agent.role, context): step
-                        for step in parallel_steps
-                    }
-                    for future in as_completed(futures):
-                        step = futures[future]
-                        try:
-                            future.result()
-                        except Exception as exc:
-                            if not step.optional:
-                                raise
-                            logger.warning("Optional parallel agent step failed (%s): %s", step.step_id, exc)
-                            context.diagnostics.append(f"{step.step_id}: optional step failed: {exc}")
-                            self._mark_dependents_executed(step.step_id, pending, executed, optional_steps)
-                        executed.add(step.step_id)
 
         context.result = NoteResult(
             markdown=context.markdown or "",
@@ -170,6 +134,9 @@ class PlanExecutor:
                     changed = True
 
     def _handle_background_step(self, step_id: str, role: AgentRole, context: AgentRuntimeContext) -> None:
+        if step_id == "visual_enhancement":
+            self._enhance_visuals(context, background=True)
+            return
         if step_id == "compose_markdown" and context.wants_link:
             self._compose_markdown(context, formats=["link"])
             context.diagnostics.append(f"{step_id}: link composition completed during base generation")
@@ -177,9 +144,6 @@ class PlanExecutor:
         context.diagnostics.append(f"{step_id}: scheduled outside base generation")
 
     def _execute_step(self, step_id: str, role: AgentRole, context: AgentRuntimeContext) -> None:
-        if context.defer_screenshots and step_id in {"select_frames", "review_frames"}:
-            context.diagnostics.append(f"{step_id}: deferred with background visual enhancement")
-            return
         if step_id == "download":
             self._download(context)
             return
@@ -189,17 +153,8 @@ class PlanExecutor:
         if step_id == "write_markdown":
             self._write_markdown(context)
             return
-        if step_id == "build_visual_inventory":
-            self._build_visual_inventory(context)
-            return
-        if step_id == "plan_visuals":
-            self._plan_visuals(context)
-            return
-        if step_id == "select_frames":
-            self._select_frames(context)
-            return
-        if step_id == "review_frames":
-            context.diagnostics.append("review_frames: handled during frame selection")
+        if step_id == "visual_enhancement":
+            self._enhance_visuals(context, background=False)
             return
         if step_id == "compose_markdown":
             formats = []
@@ -209,23 +164,24 @@ class PlanExecutor:
                 formats.append("screenshot")
             self._compose_markdown(context, formats=formats)
             return
-        if step_id == "index_chat" and self.chat_rag_agent:
-            self.chat_rag_agent.run(ChatIndexRequest(task_id=context.task_id))
-            return
         logger.info("Skip unsupported plan step %s (%s)", step_id, role)
 
-    def _update_status(
-        self,
-        context: AgentRuntimeContext,
-        status: TaskStatus,
-        message: Optional[str] = None,
-    ) -> None:
-        if not self.status_updater:
+    def _enhance_visuals(self, context: AgentRuntimeContext, background: bool) -> None:
+        if background:
+            if context.wants_link:
+                self._compose_markdown(context, formats=["link"])
+                context.diagnostics.append(
+                    "visual_enhancement: link composition completed during base generation"
+                )
+            context.diagnostics.append("visual_enhancement: scheduled outside base generation")
             return
-        try:
-            self.status_updater(context.task_id, status, message)
-        except Exception as exc:
-            logger.warning("Agent status update failed (%s): %s", status, exc)
+
+        formats = []
+        if context.wants_link:
+            formats.append("link")
+        if context.wants_screenshot:
+            formats.append("screenshot")
+        self._compose_markdown(context, formats=formats)
 
     def _download(self, context: AgentRuntimeContext) -> None:
         if context.transcript is None:
@@ -294,142 +250,23 @@ class PlanExecutor:
             )
         )
 
-    def _build_visual_inventory(self, context: AgentRuntimeContext) -> None:
-        if not context.video_path:
-            context.visual_inventory = []
-            context.diagnostics.append("build_visual_inventory: skipped because video file is unavailable")
-            return
-        self._update_status(
-            context,
-            TaskStatus.ENHANCING,
-            "正在扫描视频画面，建立截图候选清单",
-        )
-        try:
-            agent = self.markdown_composer_agent.screenshot_agent()
-            build_inventory = getattr(agent, "build_visual_inventory", None)
-            if not build_inventory:
-                context.visual_inventory = []
-                context.diagnostics.append("build_visual_inventory: unavailable on screenshot agent")
-                return
-            context.visual_inventory = build_inventory(
-                context.video_path,
-                context.audio_meta.duration if context.audio_meta else None,
-                context.transcript.segments if context.transcript else [],
-            )
-        except Exception as exc:
-            context.visual_inventory = []
-            context.diagnostics.append(f"build_visual_inventory: failed: {exc}")
-            logger.warning("Visual inventory failed; falling back to document-only screenshot planning: %s", exc)
-        context.diagnostics.append(
-            f"build_visual_inventory: found {len(context.visual_inventory)} candidate scenes"
-        )
-        self._update_status(
-            context,
-            TaskStatus.ENHANCING,
-            f"已发现 {len(context.visual_inventory)} 个候选画面，正在分析插图位置",
-        )
-
-    def _plan_visuals(self, context: AgentRuntimeContext) -> None:
-        if not context.markdown:
-            raise RuntimeError("Cannot plan screenshots before markdown is ready")
-        if not context.video_path:
-            logger.warning("截图已启用，但没有可用的视频文件；跳过截图规划")
-            context.visual_state = None
-            context.visual_slot_results = []
-            context.diagnostics.append("plan_visuals: skipped because video file is unavailable")
-            return
-        self._update_status(
-            context,
-            TaskStatus.ENHANCING,
-            "正在根据文档章节规划截图位置",
-        )
-        agent = self.markdown_composer_agent.screenshot_agent()
-        state = VisualScreenshotState(
-            markdown=context.markdown,
-            video_path=context.video_path,
-            duration=context.audio_meta.duration if context.audio_meta else None,
-            gpt=context.gpt,
-            transcript_segments=context.transcript.segments if context.transcript else [],
-            visual_inventory=context.visual_inventory,
-        )
-        state.execution_engine = "plan-executor"
-        state = agent.prepare_state(state)
-        state = agent.filter_marker_node(state)
-        state = agent.plan_slots_node(state)
-        context.visual_state = state
-
-    def _select_frames(self, context: AgentRuntimeContext) -> None:
-        if context.visual_state is None:
-            self._plan_visuals(context)
-        if context.visual_state is None:
-            return
-        state = context.visual_state
-        slots = state.slots or []
-        if not slots:
-            context.visual_slot_results = []
-            return
-
-        max_workers = min(max(1, len(slots)), 8)
-        results: list[Any] = []
-        agent = self.markdown_composer_agent.screenshot_agent()
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(agent.process_screenshot_slot, state, slot) for slot in slots]
-            for future in as_completed(futures):
-                results.append(future.result())
-        context.visual_slot_results = sorted(results, key=lambda item: item.slot.slot_id)
-
     def _compose_markdown(self, context: AgentRuntimeContext, formats: list[str]) -> None:
         if not formats:
             return
         if context.markdown is None or context.audio_meta is None:
             raise RuntimeError("Cannot compose markdown before base note is ready")
 
-        if formats == ["link"] or "screenshot" not in formats:
-            context.markdown = self.markdown_composer_agent.run(
-                MarkdownComposeRequest(
-                    markdown=context.markdown,
-                    video_path=context.video_path,
-                    formats=formats,
-                    audio_meta=context.audio_meta,
-                    platform=context.platform,
-                    gpt=context.gpt,
-                    transcript_segments=context.transcript.segments if context.transcript else [],
-                )
-            )
-            return
+        if "screenshot" in formats and not context.video_path:
+            context.diagnostics.append("visual_enhancement: skipped screenshots because video file is unavailable")
 
-        if context.visual_state is None:
-            self._plan_visuals(context)
-        if context.visual_state is None:
-            context.diagnostics.append("compose_markdown: skipped screenshots because visual planning was unavailable")
-            context.markdown = self.markdown_composer_agent.run(
-                MarkdownComposeRequest(
-                    markdown=context.markdown,
-                    video_path=context.video_path,
-                    formats=[item for item in formats if item != "screenshot"],
-                    audio_meta=context.audio_meta,
-                    platform=context.platform,
-                    gpt=context.gpt,
-                    transcript_segments=context.transcript.segments if context.transcript else [],
-                )
+        context.markdown = self.markdown_composer_agent.run(
+            MarkdownComposeRequest(
+                markdown=context.markdown,
+                video_path=context.video_path,
+                formats=formats,
+                audio_meta=context.audio_meta,
+                platform=context.platform,
+                gpt=context.gpt,
+                transcript_segments=context.transcript.segments if context.transcript else [],
             )
-            return
-        if context.visual_slot_results == [] and (context.visual_state.slots or []):
-            self._select_frames(context)
-
-        agent = self.markdown_composer_agent.screenshot_agent()
-        visual_reader = agent.create_visual_reader(context.visual_state.video_path)
-        agent.apply_screenshot_slot_results(context.visual_state, context.visual_slot_results, visual_reader)
-        context.markdown = context.visual_state.markdown
-        if "link" in formats:
-            context.markdown = self.markdown_composer_agent.run(
-                MarkdownComposeRequest(
-                    markdown=context.markdown,
-                    video_path=context.video_path,
-                    formats=["link"],
-                    audio_meta=context.audio_meta,
-                    platform=context.platform,
-                    gpt=context.gpt,
-                    transcript_segments=context.transcript.segments if context.transcript else [],
-                )
-            )
+        )

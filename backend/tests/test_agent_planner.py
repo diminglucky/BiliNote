@@ -24,12 +24,11 @@ class TestAgentPlanner(unittest.TestCase):
 
         self.assertEqual(
             plan.step_ids(),
-            ("download", "transcript", "write_markdown", "index_chat"),
+            ("download", "transcript", "write_markdown"),
         )
-        self.assertFalse(plan.has_role(AgentRole.VISUAL_PLANNER))
-        self.assertFalse(plan.has_role(AgentRole.FRAME_SELECTOR))
+        self.assertFalse(plan.has_role(AgentRole.VISUAL_ENHANCEMENT))
 
-    def test_screenshot_plan_runs_visual_slots_in_background_parallel_steps(self):
+    def test_screenshot_plan_uses_one_visual_enhancement_step(self):
         plan = build_note_execution_plan(
             AgentExecutionContext(
                 task_id="task-1",
@@ -43,17 +42,16 @@ class TestAgentPlanner(unittest.TestCase):
         )
 
         steps = {step.step_id: step for step in plan.steps}
-        self.assertIn("plan_visuals", steps)
-        self.assertIn("select_frames", steps)
-        self.assertIn("compose_markdown", steps)
-        self.assertIn("build_visual_inventory", steps)
-        self.assertEqual(steps["build_visual_inventory"].mode, StepExecutionMode.BACKGROUND)
-        self.assertEqual(steps["plan_visuals"].mode, StepExecutionMode.BACKGROUND)
-        self.assertEqual(steps["plan_visuals"].depends_on, ("build_visual_inventory",))
-        self.assertEqual(steps["select_frames"].mode, StepExecutionMode.PARALLEL)
-        self.assertEqual(steps["compose_markdown"].depends_on, ("select_frames",))
+        self.assertIn("visual_enhancement", steps)
+        self.assertNotIn("build_visual_inventory", steps)
+        self.assertNotIn("plan_visuals", steps)
+        self.assertNotIn("select_frames", steps)
+        self.assertEqual(steps["visual_enhancement"].agent.role, AgentRole.VISUAL_ENHANCEMENT)
+        self.assertEqual(steps["visual_enhancement"].mode, StepExecutionMode.BACKGROUND)
+        self.assertEqual(steps["visual_enhancement"].depends_on, ("write_markdown",))
+        self.assertTrue(steps["visual_enhancement"].optional)
 
-    def test_vision_review_is_only_enabled_when_review_mode_is_not_off(self):
+    def test_vision_review_is_an_internal_visual_enhancement_setting(self):
         plan = build_note_execution_plan(
             AgentExecutionContext(
                 task_id="task-1",
@@ -66,9 +64,10 @@ class TestAgentPlanner(unittest.TestCase):
         )
 
         steps = {step.step_id: step for step in plan.steps}
-        self.assertIn("review_frames", steps)
-        self.assertEqual(steps["review_frames"].agent.role, AgentRole.VISION_REVIEW)
-        self.assertEqual(steps["compose_markdown"].depends_on, ("review_frames",))
+        self.assertIn("visual_enhancement", steps)
+        self.assertNotIn("review_frames", steps)
+        self.assertEqual(steps["visual_enhancement"].config["review_mode"], "balanced")
+        self.assertTrue(any("handled inside visual enhancement" in item for item in plan.diagnostics))
 
     def test_prefetched_transcript_is_recorded_as_diagnostic(self):
         plan = build_note_execution_plan(

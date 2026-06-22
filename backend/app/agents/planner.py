@@ -23,35 +23,15 @@ NOTE_WRITER_AGENT = AgentSpec(
     name="NoteWriterAgent",
     description="Generate the base Markdown note from transcript and metadata.",
 )
-VISUAL_INVENTORY_AGENT = AgentSpec(
-    role=AgentRole.VISUAL_INVENTORY,
-    name="VisualInventoryAgent",
-    description="Scan the video for useful visual states before document placement.",
-)
-VISUAL_PLANNER_AGENT = AgentSpec(
-    role=AgentRole.VISUAL_PLANNER,
-    name="VisualPlannerAgent",
-    description="Plan useful screenshot positions from Markdown plus video inventory.",
-)
-FRAME_SELECTOR_AGENT = AgentSpec(
-    role=AgentRole.FRAME_SELECTOR,
-    name="FrameSelectorAgent",
-    description="Select and score frame candidates for each screenshot slot.",
-)
-VISION_REVIEW_AGENT = AgentSpec(
-    role=AgentRole.VISION_REVIEW,
-    name="VisionReviewAgent",
-    description="Optionally review ambiguous screenshot candidates with a vision model.",
+VISUAL_ENHANCEMENT_AGENT = AgentSpec(
+    role=AgentRole.VISUAL_ENHANCEMENT,
+    name="VisualEnhancementAgent",
+    description="Enhance the base Markdown with document-driven screenshots.",
 )
 MARKDOWN_COMPOSER_AGENT = AgentSpec(
     role=AgentRole.MARKDOWN_COMPOSER,
     name="MarkdownComposerAgent",
     description="Merge screenshots and links back into Markdown.",
-)
-CHAT_RAG_AGENT = AgentSpec(
-    role=AgentRole.CHAT_RAG,
-    name="ChatRagAgent",
-    description="Build searchable note/transcript indexes for follow-up Q&A.",
 )
 
 
@@ -107,61 +87,26 @@ def build_note_execution_plan(context: AgentExecutionContext) -> ExecutionPlan:
             if context.defer_screenshots
             else StepExecutionMode.SEQUENTIAL
         )
-        steps.extend(
-            [
-                AgentStep(
-                    step_id="build_visual_inventory",
-                    agent=VISUAL_INVENTORY_AGENT,
-                    mode=visual_mode,
-                    depends_on=("write_markdown",),
-                    optional=True,
-                    reason="Scan the video for useful visual states before screenshot placement.",
-                ),
-                AgentStep(
-                    step_id="plan_visuals",
-                    agent=VISUAL_PLANNER_AGENT,
-                    mode=visual_mode,
-                    depends_on=("build_visual_inventory",),
-                    optional=True,
-                    reason="Plan screenshot slots from the generated Markdown and video inventory.",
-                ),
-                AgentStep(
-                    step_id="select_frames",
-                    agent=FRAME_SELECTOR_AGENT,
-                    mode=StepExecutionMode.PARALLEL,
-                    depends_on=("plan_visuals",),
-                    optional=True,
-                    reason="Process screenshot slots concurrently.",
-                    config={"concurrency_scope": "screenshot_slots"},
-                ),
-            ]
-        )
-        if context.review_mode != "off":
-            steps.append(
-                AgentStep(
-                    step_id="review_frames",
-                    agent=VISION_REVIEW_AGENT,
-                    mode=StepExecutionMode.PARALLEL,
-                    depends_on=("select_frames",),
-                    optional=True,
-                    reason=f"Vision review mode is {context.review_mode}.",
-                    config={"review_mode": context.review_mode},
-                )
-            )
-        else:
-            diagnostics.append("VisionReviewAgent is disabled by SCREENSHOT_REVIEW_MODE=off.")
-        composer_dep = "review_frames" if context.review_mode != "off" else "select_frames"
         steps.append(
             AgentStep(
-                step_id="compose_markdown",
-                agent=MARKDOWN_COMPOSER_AGENT,
+                step_id="visual_enhancement",
+                agent=VISUAL_ENHANCEMENT_AGENT,
                 mode=visual_mode,
-                depends_on=(composer_dep,),
+                depends_on=("write_markdown",),
                 optional=True,
-                reason="Insert selected screenshots into Markdown.",
-                config={"include_links": wants_link},
+                reason="Insert useful screenshots through the visual enhancement pipeline.",
+                config={
+                    "include_links": wants_link,
+                    "review_mode": context.review_mode,
+                },
             )
         )
+        if context.review_mode != "off":
+            diagnostics.append(
+                f"Vision review mode is {context.review_mode}; handled inside visual enhancement."
+            )
+        else:
+            diagnostics.append("Vision review is disabled by SCREENSHOT_REVIEW_MODE=off.")
     elif wants_link:
         steps.append(
             AgentStep(
@@ -172,17 +117,6 @@ def build_note_execution_plan(context: AgentExecutionContext) -> ExecutionPlan:
                 config={"include_links": True},
             )
         )
-
-    steps.append(
-        AgentStep(
-            step_id="index_chat",
-            agent=CHAT_RAG_AGENT,
-            mode=StepExecutionMode.BACKGROUND,
-            depends_on=("write_markdown",),
-            optional=True,
-            reason="Index note and transcript for follow-up Q&A.",
-        )
-    )
 
     return ExecutionPlan(
         task_id=context.task_id,

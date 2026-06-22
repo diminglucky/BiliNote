@@ -2,7 +2,7 @@
 
 ## 目标
 
-把当前生成链路重构成“总调度器 + 专项子 agent + 动态工作流”。
+把当前生成链路重构成“总调度器 + 少量专项 agent + 动态工作流”。
 
 核心目标：
 
@@ -20,7 +20,7 @@
 - `VisualEnhancementService`：基于已保存笔记异步补图
 - `chat_service`：基于向量检索的问答
 
-这套结构已经接近 agent 化，但职责还不够清晰，尤其是 `NoteGenerator` 仍然承担了太多编排细节。
+这套结构已经接近 agent 化，但职责还不够清晰。顶层只应该保留用户能感知的阶段，截图内部的画面扫描、槽位规划、选帧、视觉复审不应全部暴露成独立 agent。
 
 ## 新架构
 
@@ -38,17 +38,22 @@
 
 ### 2. Sub Agent
 
-按能力拆分：
+按稳定能力拆分，避免为了设计而设计：
 
 - `DownloadAgent`
 - `TranscriptAgent`
 - `NoteWriterAgent`
-- `VisualPlannerAgent`
-- `FrameSelectorAgent`
-- `VisionReviewAgent`
+- `VisualEnhancementAgent`
 - `MarkdownComposerAgent`
-- `MindMapAgent`
-- `ChatRagAgent`
+
+`index_task_for_chat` 只作为保存后的索引 adapter 使用。它依赖结果文件已经存在，不属于核心生成计划。
+
+截图内部仍然可以有 pipeline 模块：
+
+- `VisualScreenshotAgent`：统一管理截图增强。
+- `VisualInventoryAgent`：作为内部服务扫描视频画面，不作为顶层 agent 暴露。
+- `DocumentVisualNeedPlanner` / `VisualSlotPlanner` / `VisualFrameSelector`：作为内部模块完成文档分析、截图位规划和候选帧选择。
+- 视觉复审只作为 `VisualScreenshotAgent` 的可选策略，由 `SCREENSHOT_REVIEW_MODE` 控制，不单独成为顶层 agent。
 
 ### 3. Workflow
 
@@ -61,12 +66,12 @@
   ↓
 生成 Markdown
   ↓
-视觉规划
+可选视觉增强
   ↓
-并行处理多个截图 slot
-  ↓
-合成 Markdown / 保存 / 索引
+保存 / 索引 / 导出
 ```
+
+`可选视觉增强` 内部再执行：扫描画面 → 分析文档章节 → 规划截图位 → 并行处理截图 slot → 去重与合成 Markdown。
 
 ## 动态规则
 
@@ -74,7 +79,7 @@
 
 - 无字幕时才启用转写兜底
 - 不勾选截图时跳过视觉链路
-- `SCREENSHOT_REVIEW_MODE=off` 时跳过多模态复审
+- `SCREENSHOT_REVIEW_MODE=off` 时跳过视觉复审策略
 - 笔记已经足够清晰时，减少截图 slot
 - 章节信息密度高时，允许同一章节多个 slot
 
@@ -82,7 +87,7 @@
 
 可以并行：
 
-- 多个截图 slot
+- 视觉增强内部的多个截图 slot
 - 候选帧本地评分
 - 问答索引构建
 - 导出准备
@@ -91,7 +96,7 @@
 
 - 下载在前，转写在后
 - 转写在前，写作在后
-- Markdown 规划在前，插图在后
+- Markdown 生成在前，视觉增强在后
 - 最终合成在所有 slot 完成后
 
 ## 分阶段落地

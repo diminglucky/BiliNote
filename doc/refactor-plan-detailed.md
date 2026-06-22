@@ -23,13 +23,13 @@ API route
         -> TranscriptAgent
         -> NoteWriterAgent
         -> MarkdownComposerAgent
-        -> ChatRagAgent background marker
 
 Saved base note
   -> VisualEnhancementAgent.submit()
      -> VisualEnhancementService.enhance_saved_note()
         -> VisualScreenshotAgent / LangGraph screenshot graph
         -> incremental markdown writeback
+  -> index_task_for_chat post-save indexing
 ```
 
 ## Implemented Boundaries
@@ -75,7 +75,6 @@ Task status persistence is now a standalone utility:
 `PlanExecutor` supports:
 
 - `SEQUENTIAL`: blocking pipeline step
-- `PARALLEL`: concurrent step execution
 - `BACKGROUND`: base generation records the step as scheduled
 
 Optional steps are isolated. If a visual planning/selection/composition step fails,
@@ -85,6 +84,10 @@ transcription, and note writing still fail the task.
 When `defer_screenshots=True`, the base note is saved first. Screenshot insertion is
 performed by `VisualEnhancementService` after the result file exists, so the user can
 see progress while images are added.
+
+Q&A indexing is intentionally outside `ExecutionPlan`. It runs after the result file
+has been saved, because the vector store indexes persisted note content rather than
+the in-memory generation context.
 
 ## Regeneration Semantics
 

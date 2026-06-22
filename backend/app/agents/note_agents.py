@@ -95,11 +95,6 @@ class MarkdownComposeRequest:
 
 
 @dataclass(frozen=True)
-class ChatIndexRequest:
-    task_id: str
-
-
-@dataclass(frozen=True)
 class VisualEnhancementRequest:
     task_id: str
     note: Any
@@ -543,18 +538,14 @@ class MarkdownComposerAgent:
         return normalize_markdown_toc(markdown, ensure_toc="toc" in formats) or markdown
 
 
-class ChatRagAgent:
-    def __init__(self, vector_store_factory=None):
-        self.vector_store_factory = vector_store_factory
+def index_task_for_chat(task_id: str, vector_store_factory=None) -> bool:
+    factory = vector_store_factory
+    if factory is None:
+        from app.services.vector_store import VectorStoreManager
 
-    def run(self, request: ChatIndexRequest) -> bool:
-        factory = self.vector_store_factory
-        if factory is None:
-            from app.services.vector_store import VectorStoreManager
-
-            factory = VectorStoreManager
-        factory().index_task(request.task_id)
-        return True
+        factory = VectorStoreManager
+    factory().index_task(task_id)
+    return True
 
 
 class VisualEnhancementAgent:

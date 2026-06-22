@@ -32,8 +32,6 @@ class ProjectTempDir:
 
 from app.agents.note_agents import (
     AgentRuntimeServices,
-    ChatIndexRequest,
-    ChatRagAgent,
     DownloadAgent,
     DownloadRequest,
     MarkdownComposerAgent,
@@ -44,6 +42,7 @@ from app.agents.note_agents import (
     TranscriptRequest,
     VisualEnhancementAgent,
     VisualEnhancementRequest,
+    index_task_for_chat,
 )
 from app.agents.base import AgentExecutionContext, StepExecutionMode
 from app.agents.executor import AgentRuntimeContext, PlanExecutor
@@ -53,7 +52,6 @@ from app.services.note import NoteGenerator
 from app.utils.task_status_writer import write_status_record
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
 from app.models.audio_model import AudioDownloadResult
-from app.services.visual_inventory_agent import VisualSceneCandidate
 
 
 class TestNoteAgents(unittest.TestCase):
@@ -515,16 +513,14 @@ class TestNoteAgents(unittest.TestCase):
         self.assertIn("![](shot.jpg)", result)
         self.assertIn("[00:01](url)", result)
 
-    def test_chat_rag_agent_indexes_task(self):
+    def test_index_task_for_chat_indexes_task(self):
         indexed = []
 
         class _VectorStore:
             def index_task(self, task_id):
                 indexed.append(task_id)
 
-        result = ChatRagAgent(vector_store_factory=_VectorStore).run(
-            ChatIndexRequest(task_id="task-1")
-        )
+        result = index_task_for_chat("task-1", vector_store_factory=_VectorStore)
 
         self.assertTrue(result)
         self.assertEqual(indexed, ["task-1"])
@@ -647,7 +643,7 @@ class TestNoteAgents(unittest.TestCase):
         self.assertEqual(updates[0][3], TaskStatus.PARTIAL_SUCCESS)
         self.assertIn("worker failed", updates[0][4])
 
-    def test_execution_plan_keeps_screenshot_composer_background_when_deferred(self):
+    def test_execution_plan_keeps_visual_enhancement_background_when_deferred(self):
         plan = build_note_execution_plan(
             AgentExecutionContext(
                 task_id="task-1",
@@ -659,10 +655,10 @@ class TestNoteAgents(unittest.TestCase):
             )
         )
 
-        compose = plan.get_step("compose_markdown")
+        enhance = plan.get_step("visual_enhancement")
 
-        self.assertIsNotNone(compose)
-        self.assertEqual(compose.mode, StepExecutionMode.BACKGROUND)
+        self.assertIsNotNone(enhance)
+        self.assertEqual(enhance.mode, StepExecutionMode.BACKGROUND)
 
     def test_plan_executor_drives_base_note_generation(self):
         transcript = TranscriptResult(
@@ -711,11 +707,6 @@ class TestNoteAgents(unittest.TestCase):
                 captured["compose_formats"] = request.formats
                 return request.markdown.replace("*Content-[00:01]", "[00:01](url)")
 
-        class _ChatAgent:
-            def run(self, request):
-                captured["indexed"] = request.task_id
-                return True
-
         with ProjectTempDir() as tmp_dir:
             plan = build_note_execution_plan(
                 AgentExecutionContext(
@@ -745,15 +736,12 @@ class TestNoteAgents(unittest.TestCase):
                 transcript_agent=_TranscriptAgent(),
                 note_writer_agent=_WriterAgent(),
                 markdown_composer_agent=_ComposerAgent(),
-                chat_rag_agent=_ChatAgent(),
             ).run(plan, context)
 
         self.assertTrue(captured["download_skip"])
         self.assertTrue(captured["writer_link"])
         self.assertEqual(captured["writer_formats"], ["link"])
         self.assertEqual(captured["compose_formats"], ["link"])
-        self.assertNotIn("indexed", captured)
-        self.assertTrue(any("index_chat" in item for item in result.diagnostics))
         self.assertEqual(result.markdown, "## Note [00:01](url)\n")
 
     def test_plan_executor_keeps_base_note_when_optional_visual_step_fails(self):
@@ -792,16 +780,9 @@ class TestNoteAgents(unittest.TestCase):
             def run(self, _request):
                 return "## Important *Content-[00:01]\n"
 
-        class _ScreenshotAgent:
-            def prepare_state(self, _state):
-                raise RuntimeError("visual failed")
-
         class _ComposerAgent:
-            def screenshot_agent(self):
-                return _ScreenshotAgent()
-
             def run(self, request):
-                return request.markdown
+                raise RuntimeError("visual failed")
 
         with ProjectTempDir() as tmp_dir:
             plan = build_note_execution_plan(
@@ -836,9 +817,9 @@ class TestNoteAgents(unittest.TestCase):
             ).run(plan, context)
 
         self.assertEqual(result.markdown, "## Important *Content-[00:01]\n")
-        self.assertTrue(any("plan_visuals: optional step failed" in item for item in result.diagnostics))
+        self.assertTrue(any("visual_enhancement: optional step failed" in item for item in result.diagnostics))
 
-    def test_plan_executor_passes_visual_inventory_into_visual_planning(self):
+    def test_plan_executor_delegates_visual_enhancement_to_markdown_composer(self):
         transcript = TranscriptResult(
             language="zh",
             full_text="hello",
@@ -854,18 +835,7 @@ class TestNoteAgents(unittest.TestCase):
             raw_info={},
             video_path="video.mp4",
         )
-        inventory = [
-            VisualSceneCandidate(
-                start=10,
-                end=30,
-                representative_ts=22,
-                score=0.82,
-                scene_type="result",
-                reasons=["result"],
-            )
-        ]
         captured = {}
-        status_updates = []
 
         class _TranscriptAgent:
             def load_cached_or_platform_subtitles(self, **_kwargs):
@@ -886,41 +856,12 @@ class TestNoteAgents(unittest.TestCase):
             def run(self, _request):
                 return "## 环境处理 *Content-[00:00]\n这里说明准备过程。\n"
 
-        class _ScreenshotAgent:
-            def build_visual_inventory(self, _video_path, _duration, _segments):
-                return inventory
-
-            def prepare_state(self, state):
-                captured["visual_inventory"] = state.visual_inventory
-                state.matches = []
-                state.visual_plans = []
-                state.slots = []
-                state.generated_images = []
-                state.generated_image_paths = []
-                state.published_image_paths = []
-                return state
-
-            def filter_marker_node(self, state):
-                return state
-
-            def plan_slots_node(self, state):
-                return state
-
-            def create_visual_reader(self, _video_path):
-                return object()
-
-            def apply_screenshot_slot_results(self, _state, _results, _visual_reader):
-                return None
-
         class _ComposerAgent:
-            def __init__(self):
-                self._screenshot_agent = _ScreenshotAgent()
-
-            def screenshot_agent(self):
-                return self._screenshot_agent
-
             def run(self, request):
-                return request.markdown
+                captured["formats"] = request.formats
+                captured["video_path"] = request.video_path
+                captured["segments"] = request.transcript_segments
+                return request.markdown + "\n![](/static/screenshots/shot.jpg)\n"
 
         with ProjectTempDir() as tmp_dir:
             plan = build_note_execution_plan(
@@ -952,14 +893,12 @@ class TestNoteAgents(unittest.TestCase):
                 transcript_agent=_TranscriptAgent(),
                 note_writer_agent=_WriterAgent(),
                 markdown_composer_agent=_ComposerAgent(),
-                status_updater=lambda *args: status_updates.append(args),
             ).run(plan, context)
 
-        self.assertEqual(captured["visual_inventory"], inventory)
-        self.assertEqual(result.visual_inventory, inventory)
-        self.assertTrue(any("build_visual_inventory: found 1" in item for item in result.diagnostics))
-        self.assertTrue(any(update[1] == TaskStatus.ENHANCING for update in status_updates))
-        self.assertTrue(any("候选画面" in (update[2] or "") for update in status_updates))
+        self.assertEqual(captured["formats"], ["screenshot"])
+        self.assertEqual(captured["video_path"], pathlib.Path("video.mp4"))
+        self.assertEqual(captured["segments"], transcript.segments)
+        self.assertIn("shot.jpg", result.markdown)
 
     def test_plan_executor_keeps_base_note_when_screenshot_video_missing(self):
         transcript = TranscriptResult(

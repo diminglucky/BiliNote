@@ -1,140 +1,154 @@
 # VideoNote
 
-> Current version: `0.2.5`
+> 当前版本：`0.2.6`
 >
-> License notice: VideoNote is provided only for personal study, research, evaluation, and other non-commercial use. Any form of commercialization is prohibited unless explicitly authorized in writing by the author.
+> 使用限制：本项目仅允许个人学习、研究、评估和非商业自用。未经作者明确书面授权，禁止任何形式的商业化使用、商业部署、付费服务、二次售卖或商业集成。
 
-VideoNote is an AI video note workspace. It turns Bilibili, YouTube, Douyin, Kuaishou, and local video files into structured Markdown notes, then enhances those notes with carefully selected screenshots from the source video.
+VideoNote 是一个面向真实学习场景的 AI 视频笔记项目。它可以从 Bilibili、YouTube、抖音、快手和本地视频中提取内容，先生成结构化 Markdown 笔记，再根据笔记内容反推需要截图的位置，把真正有用的画面插入到对应章节里。
 
-The project is being rebuilt as an independent personal project on top of the historical BiliNote codebase. Some directory names are still inherited from the original project, such as `BillNote_frontend`, but the product direction, UI, README, screenshot workflow, and agent architecture are now focused on VideoNote.
+这个项目基于历史 BiliNote 代码继续演进，但当前产品方向已经重新定位为个人项目 `VideoNote`。仓库里仍保留一些继承下来的目录名，例如 `BillNote_frontend`，后续会继续逐步清理；README、界面方向、截图流程、导出体验和 agent 架构都以 VideoNote 为准。
 
-## Why VideoNote
+## 项目目标
 
-Most video-summary tools stop at transcript summarization. VideoNote is designed for a harder target: a note that can actually be reviewed, organized, exported, and imported into a knowledge base.
+VideoNote 不只是“把视频总结成几段话”。它更关注能不能生成一份真正可以复习、整理、导出、导入知识库的笔记。
 
-VideoNote focuses on four things:
+核心目标：
 
-- Generate a readable Markdown note first, so the user gets useful content quickly.
-- Use the written note to decide where screenshots belong, instead of blindly sampling frames by time.
-- Avoid repeated or low-value screenshots, especially long runs of images with little text between them.
-- Continue the full workflow even when the video source is low resolution, while making partial screenshot issues visible.
+- 先快速生成可读的 Markdown 笔记，让用户尽早看到内容。
+- 根据每个标题和段落的实际内容决定是否需要截图，而不是按视频时长硬凑图片数量。
+- 截图要服务于知识点，避免空白页、模糊页、重复页、过多连续图片和无关画面。
+- 视频没有高清源时也继续完整生成，不因为清晰度不足直接中断。
+- 长任务要有明确进度，失败和降级要能被用户看见。
+- 导出时尽量解决 Markdown 图片丢失的问题，让笔记能迁移到其他工具。
 
-## Real Output
+## 真实效果截图
 
-The screenshots below are real VideoNote task outputs copied from this repository's generated screenshot directory. They are not legacy demo images.
+下面图片来自本仓库当前 VideoNote 流程生成的真实任务结果，不是历史项目的演示图。
 
-![VideoNote real generated screenshot 1](docs/assets/videonote-real-shot-1.png)
+![VideoNote 真实生成截图 1](docs/assets/videonote-real-shot-1.png)
 
-![VideoNote real generated screenshot 2](docs/assets/videonote-real-shot-2.png)
+![VideoNote 真实生成截图 2](docs/assets/videonote-real-shot-2.png)
 
-![VideoNote real generated screenshot 3](docs/assets/videonote-real-shot-3.png)
+![VideoNote 真实生成截图 3](docs/assets/videonote-real-shot-3.png)
 
-![VideoNote real generated screenshot 4](docs/assets/videonote-real-shot-4.png)
+![VideoNote 真实生成截图 4](docs/assets/videonote-real-shot-4.png)
 
-![VideoNote real generated screenshot 5](docs/assets/videonote-real-shot-5.png)
+![VideoNote 真实生成截图 5](docs/assets/videonote-real-shot-5.png)
 
-## Features
+## 主要功能
 
-- Generate structured Markdown notes from video links or local video files.
-- Support Bilibili, YouTube, Douyin, Kuaishou, and local video input.
-- Download video/audio with platform-specific downloader adapters.
-- Use configured transcribers such as Fast Whisper, Groq, Bcut, Kuaishou, or MLX Whisper.
-- Generate chaptered notes with time anchors, table of contents, source-video links, and AI summaries.
-- Build a visual inventory from the video, then insert screenshots according to the Markdown content.
-- Run screenshot enhancement asynchronously after the base note is saved.
-- Export Markdown, HTML, DOCX, PDF, and ZIP bundles.
-- Preserve image accessibility better by using ZIP or document exports when moving notes to other tools.
-- Provide RAG-style Q&A over generated notes and transcripts.
-- Manage LLM providers, models, transcriber settings, cookies, proxies, and system status in the UI.
-- Provide a browser extension for starting notes directly from video pages.
-- Keep partial failures visible instead of returning a fake success.
+- 支持视频链接和本地视频文件生成笔记。
+- 支持 Bilibili、YouTube、抖音、快手和本地文件。
+- 支持平台 cookie、代理、下载器配置，尽量获取更高质量的视频源。
+- 支持 Fast Whisper、Groq、Bcut、快手、MLX Whisper 等转写方式。
+- 支持多个 LLM provider 和模型配置。
+- 生成带目录、章节、时间锚点、来源链接和总结的 Markdown。
+- 可选截图增强：先生成笔记，再异步分析文档和视频，把截图插入到合适位置。
+- 支持截图质量检测、重复过滤、密度控制和降级提示。
+- 支持 Markdown 预览、思维导图、历史记录、重新生成和任务进度展示。
+- 支持 Markdown 图片包 ZIP、HTML、DOCX、PDF 等导出方式。
+- 支持基于笔记和转写内容的问答索引。
+- 提供浏览器扩展入口，可在视频页面快速发起生成。
 
-## Screenshot Strategy
+## 截图策略
 
-VideoNote does not use a fixed screenshot count.
+VideoNote 不使用固定截图数量。
 
-The current screenshot workflow is:
+当前策略是：
 
-1. Generate the base Markdown note.
-2. Scan the video and build a visual inventory.
-3. Read each Markdown section and identify where visual evidence would help.
-4. Map relevant document lines to nearby transcript time windows and visual candidates.
-5. Capture candidate frames around those times.
-6. Score candidates for clarity, information density, blank content, blur, and near-duplicates.
-7. Insert screenshots back into the Markdown asynchronously.
-8. Collapse repeated or overly dense image runs so the final note remains readable.
+1. 先生成基础 Markdown 笔记。
+2. 按章节和段落分析笔记中哪些地方需要视觉证据。
+3. 把文档位置映射回对应的视频时间窗口。
+4. 在候选时间附近截取多个画面。
+5. 过滤空白、模糊、重复、低信息密度和无关画面。
+6. 控制同一章节内的图片密度，避免连续长段都是截图。
+7. 将最终截图异步写回 Markdown，并保留可追踪的视觉报告。
 
-This means a dense technical section can receive several screenshots, while a short section with little supporting prose should usually receive one or two at most.
+这意味着：信息密度高的章节可以有多张图；纯讲解、过渡、重复画面或价值不大的段落可以没有图。截图数量由内容决定，不由视频时长决定。
 
-## Agent Architecture
+## Agent 架构
 
-VideoNote uses a coordinated set of agents and services rather than a single monolithic note generator.
+VideoNote 的 agent 设计追求“职责清晰”和“不过度包装”。顶层编排保持简洁，截图内部流程由视觉增强模块处理。
 
 ```text
-User input
+用户输入
   -> NoteGenerator
   -> PlanExecutor
-  -> downloader / transcriber / LLM
-  -> base Markdown note
-  -> VisualInventoryAgent
-  -> VisualScreenshotAgent
-  -> VisualEnhancementService
-  -> final Markdown with screenshots
-  -> export / preview / Q&A
+  -> DownloadAgent
+  -> TranscriptAgent
+  -> NoteWriterAgent
+  -> 基础 Markdown
+  -> VisualEnhancementAgent
+  -> VisualScreenshotAgent 内部流程
+  -> MarkdownComposerAgent
+  -> 最终笔记 / 导出 / 问答索引
 ```
 
-Main roles:
+当前主要角色：
 
-- `NoteGenerator`: task entry point for download, transcription, note generation, persistence, and status updates.
-- `PlanExecutor`: executes the generation plan and makes long-running work easier to observe.
-- `VisualInventoryAgent`: scans video frames and keeps useful visual candidates.
-- `VisualScreenshotAgent`: decides which Markdown sections need screenshots, chooses timestamps, captures frames, filters duplicates, and inserts images.
-- `VisualEnhancementService`: saves the base note first, then writes screenshot enhancements back asynchronously.
-- `MarkdownComposerAgent`: keeps final Markdown structure, source links, screenshots, and summaries coherent.
+- `NoteGenerator`：任务入口，负责参数、状态、缓存、持久化和整体生命周期。
+- `PlanExecutor`：执行顶层计划，让下载、转写、写作、截图增强这些长步骤可观察。
+- `DownloadAgent`：负责视频、音频、字幕和元信息获取。
+- `TranscriptAgent`：负责转写或读取字幕缓存。
+- `NoteWriterAgent`：负责根据转写内容生成高质量基础 Markdown。
+- `VisualEnhancementAgent`：在基础笔记保存后启动截图增强，避免用户一直等不到正文。
+- `VisualScreenshotAgent`：负责视觉截图内部流程，包括文档分析、候选时间选择、截帧、评分、去重和插入。
+- `MarkdownComposerAgent`：负责最终 Markdown 的结构、链接、截图和版本内容合成。
+- `index_task_for_chat`：任务保存后的问答索引适配器，不再作为核心生成 agent。
 
-The current design is intentionally practical: LangGraph is used where graph-style state flow helps, but the project does not add LangChain or LangGraph only for appearance.
+后续继续优化的方向不是盲目增加 agent，而是让每个角色有明确输入、输出、失败边界和可测试行为。
 
-## Project Structure
+## 技术栈
+
+- 后端：Python 3.11、FastAPI、SQLAlchemy、SQLite
+- 前端：React 19、Vite、TypeScript、Tailwind、shadcn/ui
+- 桌面端：Tauri
+- 浏览器扩展：Vue 3、Vite、MV3
+- 视频处理：FFmpeg、yt-dlp
+- 转写：Whisper/Groq/Bcut/平台字幕等
+- 笔记生成：可配置 LLM provider
+
+## 项目结构
 
 ```text
-backend/              FastAPI backend for downloading, transcription, generation, screenshots, export, and task state
-BillNote_frontend/    React + Vite frontend for generation, history, preview, settings, export, and progress
-BillNote_extension/   Browser extension for starting VideoNote from video pages
-docs/assets/          README screenshots generated by the current VideoNote workflow
-doc/                  Historical design notes and legacy reference material
-config/               Local configuration
-note_results/         Local generated task results
+backend/              FastAPI 后端，包含下载、转写、生成、截图、导出和任务状态
+BillNote_frontend/    React 前端，包含主页、历史、预览、设置、导出和进度反馈
+BillNote_extension/   浏览器扩展，可从视频页面发起 VideoNote 任务
+docs/assets/          README 使用的真实项目截图
+doc/                  架构设计、重构计划和历史说明
+config/               本地配置
+note_results/         本地生成结果
 ```
 
-## Requirements
+## 环境要求
 
 - Python 3.11
 - Node.js 20+
 - pnpm
 - FFmpeg
-- Anaconda environment `play` is recommended on Windows
-- A configured LLM provider and model
-- Optional platform cookies for higher-quality video download on sites that require login
+- Windows 推荐使用 Anaconda 环境 `play`
+- 至少配置一个可用的 LLM provider 和模型
+- 如需下载更高清的视频，建议配置对应平台 cookie
 
-## Quick Start
+## 快速启动
 
-On Windows, the easiest way to start the web app is:
+Windows 下推荐直接运行：
 
 ```bat
 start-dev.bat
 ```
 
-Default addresses:
+默认地址：
 
-- Frontend: `http://127.0.0.1:3015`
-- Backend: `http://127.0.0.1:8483`
-- API docs: `http://127.0.0.1:8483/docs`
+- 前端：`http://127.0.0.1:3015`
+- 后端：`http://127.0.0.1:8483`
+- API 文档：`http://127.0.0.1:8483/docs`
 
-If port `8483` or `3015` is already occupied, close the old backend/frontend terminal windows first, or stop the old processes before starting again.
+如果端口被占用，先关闭旧的后端和前端终端，再重新启动。
 
-## Manual Development
+## 手动启动
 
-Backend:
+后端：
 
 ```bash
 cd backend
@@ -142,7 +156,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Frontend:
+前端：
 
 ```bash
 cd BillNote_frontend
@@ -150,7 +164,7 @@ pnpm install
 pnpm dev
 ```
 
-Browser extension:
+浏览器扩展：
 
 ```bash
 cd BillNote_extension
@@ -158,49 +172,47 @@ pnpm install
 pnpm dev
 ```
 
-Then load `BillNote_extension/extension/` as an unpacked extension in the browser.
+然后在浏览器扩展管理页加载 `BillNote_extension/extension/`。
 
-## Configuration
+## 常用配置
 
-Common environment variables:
+常见环境变量：
 
-- `BACKEND_PORT`: backend port, default `8483`
-- `FRONTEND_PORT`: frontend port, default `3015`
-- `FFMPEG_BIN_PATH`: custom FFmpeg path
-- `TRANSCRIBER_TYPE`: transcriber type, such as `fast-whisper` or `groq`
-- `WHISPER_MODEL_SIZE`: Whisper model size, such as `medium`
-- `OUT_DIR`: screenshot output directory
-- `IMAGE_BASE_URL`: image URL prefix used in Markdown
-- `SCREENSHOT_REVIEW_MODE`: optional vision review mode, default `off`
-- `SCREENSHOT_CANDIDATE_LIMIT`: screenshot candidate limit
-- `SCREENSHOT_COMFORT_MAX_PER_SECTION`: comfortable per-section screenshot cap, default `3`
+- `BACKEND_PORT`：后端端口，默认 `8483`
+- `FRONTEND_PORT`：前端端口，默认 `3015`
+- `FFMPEG_BIN_PATH`：自定义 FFmpeg 路径
+- `TRANSCRIBER_TYPE`：转写方式，例如 `fast-whisper` 或 `groq`
+- `WHISPER_MODEL_SIZE`：Whisper 模型大小，例如 `medium`
+- `OUT_DIR`：截图输出目录
+- `IMAGE_BASE_URL`：Markdown 图片 URL 前缀
+- `SCREENSHOT_REVIEW_MODE`：截图视觉复核模式，默认 `off`
+- `SCREENSHOT_CANDIDATE_LIMIT`：截图候选数量上限
+- `SCREENSHOT_COMFORT_MAX_PER_SECTION`：单章节舒适截图上限，默认 `3`
 
-LLM API keys should be configured from the frontend settings page when possible.
+LLM API key 建议在前端设置页里配置。
 
-## Export Notes
+## 导出说明
 
-Markdown image handling matters.
+Markdown 本身只保存文字和图片引用。如果图片引用指向本地后端地址，后端关闭、服务器清理、图片目录迁移后，其他工具可能无法显示图片。
 
-Plain Markdown stores text and image references. If those image references point to a local backend URL, other apps may not be able to load the images after the backend is closed or screenshots are cleaned.
+推荐方式：
 
-Recommended export choices:
+- 需要 Markdown 和图片一起迁移：导出 ZIP，里面包含 `note.md` 和 `images/`。
+- 需要单文件阅读或分享：导出 HTML、DOCX 或 PDF。
+- 只导出普通 `.md`：适合目标工具可以访问图片地址，或者你已经手动处理图片。
 
-- Use ZIP when you want Markdown plus local image files together.
-- Use HTML, DOCX, or PDF when you need a self-contained document-like result.
-- Use plain Markdown only when the target system can also access the referenced images.
+导入 Notion、Obsidian 或其他知识库时，优先使用带图片文件的 ZIP 或自包含格式，避免过一段时间图片失效。
 
-This is especially important when importing notes into tools such as Notion, Obsidian, or other knowledge-base systems.
+## 测试
 
-## Testing
-
-Backend focused tests:
+后端：
 
 ```bash
 cd backend
 pytest
 ```
 
-Frontend:
+前端：
 
 ```bash
 cd BillNote_frontend
@@ -208,7 +220,7 @@ pnpm build
 pnpm lint
 ```
 
-Browser extension:
+浏览器扩展：
 
 ```bash
 cd BillNote_extension
@@ -217,31 +229,31 @@ pnpm typecheck
 pnpm test
 ```
 
-The current screenshot and agent workflow is covered by focused tests around visual planning, screenshot density, partial success, cache recovery, and quality benchmarking.
+当前重点测试覆盖 agent 计划、截图增强、截图密度、部分成功、缓存恢复和视觉质量报告。
 
-## Current Focus
+## 当前重点
 
-VideoNote is still under active reconstruction. The most important engineering priorities are:
+VideoNote 仍在持续重构和打磨，当前优先级：
 
-- Better screenshot precision against real long videos.
-- Faster end-to-end generation.
-- More stable failure recovery.
-- Clearer frontend progress feedback.
-- Better export packaging for Markdown plus images.
-- Cleaner separation between inherited BiliNote structure and new VideoNote design.
+- 提升真实长视频下的截图命中率。
+- 提升基础笔记质量，让截图插入有更可靠的文档依据。
+- 缩短端到端生成耗时。
+- 改进失败恢复和降级提示。
+- 优化重新生成、进度条和后台任务反馈。
+- 继续清理历史 BiliNote 命名和无效代码。
 
-## Non-Commercial Use Only
+## 非商业使用声明
 
-This project may be used only for personal learning, research, evaluation, and non-commercial self-use.
+本项目仅允许个人学习、研究、评估和非商业自用。
 
-Without explicit written permission from the author, the following are prohibited:
+未经作者明确书面授权，禁止：
 
-- Commercial deployment
-- Commercial SaaS
-- Paid API service
-- Paid courses, training, delivery, or consulting based on this project
-- Paid hosting, operation, or note-generation service
-- Resale, paid distribution, or paid repackaging
-- Use as part of a commercial product, commercial plugin, or commercial platform
+- 商业部署
+- 商业 SaaS
+- 付费 API 服务
+- 基于本项目的付费课程、培训、交付或咨询
+- 付费托管、运营或笔记生成服务
+- 转售、付费分发或付费打包
+- 集成到任何商业产品、商业插件或商业平台中
 
-This repository contains historical code and structure derived from the open-source BiliNote project. The original MIT copyright notice is preserved in `LICENSE` and `NOTICE`. New VideoNote-specific customization in this repository is subject to the non-commercial restriction described above.
+本仓库包含来自开源 BiliNote 项目的历史代码和结构，原始 MIT 版权声明保留在 `LICENSE` 和 `NOTICE` 中。本仓库新增的 VideoNote 定制、产品化调整、README、界面设计和重构内容受以上非商业限制约束。
