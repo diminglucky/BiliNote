@@ -160,6 +160,55 @@ class TestVisualScreenshotGraph(unittest.TestCase):
         self.assertEqual(summary["slots"][0]["selection"]["selected_by"], "heuristic")
         self.assertEqual(summary["images"][0]["url"].startswith("/static/screenshots/"), True)
 
+    def test_langgraph_path_publishes_slot_progress_updates(self):
+        from app.services.visual_screenshot_agent import VisualScreenshotAgent, VisualScreenshotState
+
+        class _Reader:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            @staticmethod
+            def _calculate_file_md5(path):
+                return pathlib.Path(path).name
+
+            @staticmethod
+            def _score_frame(_path):
+                return 0.92, 123
+
+            @staticmethod
+            def _is_same_visual_state(_left, _right):
+                return False
+
+        with ProjectTempDir() as tmp_dir:
+            def _generate(_video_path, _output_dir, _timestamp, index):
+                path = pathlib.Path(tmp_dir) / f"shot_{index}.jpg"
+                path.write_bytes(b"image")
+                return str(path)
+
+            messages = []
+            agent = VisualScreenshotAgent(
+                image_output_dir=tmp_dir,
+                image_base_url="/static/screenshots",
+                video_reader_cls=_Reader,
+                screenshot_func=_generate,
+            )
+            state = VisualScreenshotState(
+                markdown=(
+                    "## UI demo *Content-[00:00]\n"
+                    "This screen demo shows a UI, code, page, and final result.\n"
+                    "*Screenshot-[00:10]\n"
+                ),
+                video_path=pathlib.Path("video.mp4"),
+                duration=60,
+                on_stage_update=messages.append,
+            )
+
+            agent.run(state)
+
+        self.assertTrue(any("已规划 1 个截图位置" in message for message in messages))
+        self.assertTrue(any("正在筛选第 1 个截图位置" in message for message in messages))
+        self.assertTrue(any("已选中第 1 个截图位置" in message for message in messages))
+
     def test_real_langgraph_path_cleans_generated_files_on_failure(self):
         from app.services.visual_screenshot_agent import VisualScreenshotAgent, VisualScreenshotState
         visual_agent_module = sys.modules["app.services.visual_screenshot_agent"]
@@ -1291,6 +1340,24 @@ class TestVisualScreenshotGraph(unittest.TestCase):
             [line for line, _timestamp in hermes.visual_line_times[:2]],
         )
 
+    def test_text_only_dense_code_section_without_visual_inventory_gets_single_probe(self):
+        from app.services.visual_screenshot_agent import VisualScreenshotAgent
+
+        markdown = (
+            "## Vector store setup *Content-[13:20]\n"
+            "This paragraph mentions code, configuration, Agent workflow, command output, "
+            "UI screen, final result, architecture, flow, and table details, but it has no "
+            "separate steps or code block that would justify several independent screenshots.\n\n"
+            "## End *Content-[17:00]\n"
+            "Summary.\n"
+        )
+        agent = VisualScreenshotAgent(".", "/static/screenshots")
+
+        plans = agent.plan_visual_screenshots(markdown, 1100, visual_inventory=[])
+        section_plans = [plan for plan in plans if plan.title.startswith("Vector store")]
+
+        self.assertEqual(len(section_plans), 1)
+
     def test_visual_line_time_prefers_transcript_and_inventory_evidence(self):
         from app.services.visual_inventory_agent import VisualSceneCandidate
         from app.services.visual_screenshot_agent import VisualScreenshotAgent
@@ -1453,6 +1520,34 @@ class TestVisualScreenshotGraph(unittest.TestCase):
 
         self.assertGreaterEqual(len(plans), 1)
         self.assertLessEqual(len(plans), 2)
+
+    def test_visual_inventory_collapses_repeated_candidates_for_same_document_anchor(self):
+        from app.services.visual_inventory_agent import VisualSceneCandidate
+        from app.services.visual_screenshot_agent import VisualScreenshotAgent
+
+        agent = VisualScreenshotAgent(".", "/static/screenshots")
+        markdown = (
+            "## 单点演示 *Content-[00:00]\n"
+            "这一段只说明同一个页面上的最终运行结果和输出。\n\n"
+            "## 下一节 *Content-[03:00]\n"
+            "这里只讲背景。\n"
+        )
+        inventory = [
+            VisualSceneCandidate(
+                start=20 + idx * 8,
+                end=30 + idx * 8,
+                representative_ts=24 + idx * 8,
+                score=0.78 - idx * 0.01,
+                scene_type="result",
+                reasons=["clear-visual-state", "result"],
+            )
+            for idx in range(5)
+        ]
+
+        plans = agent.plan_visual_screenshots(markdown, 240, visual_inventory=inventory)
+        single_point_plans = [plan for plan in plans if plan.title.startswith("单点演示")]
+
+        self.assertEqual(len(single_point_plans), 1)
 
     def test_visual_inventory_allows_three_images_for_structured_dense_section(self):
         from app.services.visual_inventory_agent import VisualSceneCandidate

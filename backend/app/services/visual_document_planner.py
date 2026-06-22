@@ -227,24 +227,39 @@ class DocumentVisualNeedPlanner:
         plans: List[Any] = []
         total_duration = int(duration or 0)
         for analysis in analyses:
+            executable_count = int(analysis.suggested_count)
+            has_structured_body = bool(
+                re.search(
+                    r"^#{3,6}\s+|```|^\s*(?:[-*+]|\d+[.)])\s+",
+                    analysis.body,
+                    flags=re.MULTILINE,
+                )
+            )
+            if (
+                not analysis.screenshot_times
+                and "visual-inventory" not in set(analysis.reasons)
+                and not has_structured_body
+                and len(analysis.visual_line_times) <= 1
+            ):
+                executable_count = min(executable_count, 1)
             section_anchor_times = self.hooks.section_anchor_times(
                 analysis.start,
                 analysis.end,
-                analysis.suggested_count,
+                executable_count,
             )
             if analysis.screenshot_times:
                 anchor_source = (
                     analysis.screenshot_times
-                    if len(analysis.screenshot_times) >= analysis.suggested_count
+                    if len(analysis.screenshot_times) >= executable_count
                     else analysis.screenshot_times + section_anchor_times
                 )
                 anchor_times = self.hooks.spread_anchor_times(
                     anchor_source,
-                    analysis.suggested_count,
+                    executable_count,
                     self.hooks.adaptive_min_gap(
                         analysis.start,
                         analysis.end,
-                        analysis.suggested_count,
+                        executable_count,
                         len(analysis.screenshot_times),
                     ),
                 )
@@ -252,7 +267,7 @@ class DocumentVisualNeedPlanner:
                 anchor_times = section_anchor_times
 
             if analysis.visual_line_times and not analysis.screenshot_times:
-                anchor_times = [ts for _line, ts in analysis.visual_line_times[:analysis.suggested_count]]
+                anchor_times = [ts for _line, ts in analysis.visual_line_times[:executable_count]]
 
             for anchor_idx, anchor_time in enumerate(anchor_times):
                 ts = anchor_time
@@ -283,7 +298,8 @@ class DocumentVisualNeedPlanner:
         filtered: List[Any] = []
         plan_limit = screenshot_content_budget(analyses)
         analysis_by_line = {analysis.line_index: analysis for analysis in analyses}
-        for plan in sorted(plans, key=lambda item: (-item.score, item.start)):
+        anchor_deduped = self._dedupe_plans_by_insert_anchor(plans)
+        for plan in sorted(anchor_deduped, key=lambda item: (-item.score, item.start)):
             analysis = analysis_by_line.get(plan.line_index)
             min_gap = (
                 self.hooks.adaptive_min_gap(
@@ -295,7 +311,7 @@ class DocumentVisualNeedPlanner:
                 if analysis
                 else 24
             )
-            if any(abs(plan.start - kept.start) < min_gap for kept in filtered):
+            if any(self._plans_are_too_close(plan, kept, min_gap) for kept in filtered):
                 continue
             filtered.append(plan)
             if len(filtered) >= plan_limit:
@@ -308,3 +324,100 @@ class DocumentVisualNeedPlanner:
              for item in filtered],
         )
         return filtered
+
+    @staticmethod
+    def _plans_are_too_close(candidate: Any, kept: Any, min_gap: int) -> bool:
+        gap = abs(int(getattr(candidate, "start", 0) or 0) - int(getattr(kept, "start", 0) or 0))
+        if gap >= min_gap:
+            return False
+
+        candidate_insert_line = getattr(candidate, "insert_line", None)
+        kept_insert_line = getattr(kept, "insert_line", None)
+        if (
+            getattr(candidate, "insert_reason", "") == "document-anchor"
+            and getattr(kept, "insert_reason", "") == "document-anchor"
+            and candidate_insert_line is not None
+            and kept_insert_line is not None
+            and int(candidate_insert_line) != int(kept_insert_line)
+        ):
+            relaxed_gap = max(4, min(8, min_gap))
+            return gap < relaxed_gap
+
+        return True
+
+    @staticmethod
+    def _dedupe_plans_by_insert_anchor(plans: List[Any]) -> List[Any]:
+        best_by_anchor: dict[tuple[int, int], list[Any]] = {}
+        passthrough: List[Any] = []
+        for plan in plans:
+            insert_line = getattr(plan, "insert_line", None)
+            if insert_line is None:
+                passthrough.append(plan)
+                continue
+            context = str(getattr(plan, "context", "") or "")
+            if "Screenshot-" in context:
+                passthrough.append(plan)
+                continue
+            key = (int(getattr(plan, "line_index", 0) or 0), int(insert_line))
+            bucket = best_by_anchor.setdefault(key, [])
+            current_idx = DocumentVisualNeedPlanner._matching_anchor_cluster_index(bucket, plan)
+            if current_idx is None:
+                bucket.append(plan)
+                continue
+            current = bucket[current_idx]
+            if DocumentVisualNeedPlanner._prefer_plan(plan, current) is plan:
+                bucket[current_idx] = plan
+        return passthrough + [plan for bucket in best_by_anchor.values() for plan in bucket]
+
+    @staticmethod
+    def _matching_anchor_cluster_index(existing_plans: List[Any], plan: Any) -> Optional[int]:
+        if not existing_plans:
+            return None
+        section_start = int(getattr(plan, "section_start", 0) or getattr(plan, "start", 0) or 0)
+        section_end = int(getattr(plan, "section_end", 0) or getattr(plan, "end", 0) or section_start + 1)
+        duration = max(1, section_end - section_start)
+        context = str(getattr(plan, "context", "") or "")
+        authored_context = re.split(r"\n\n(?:相关字幕|可用视频画面)：\n", context, maxsplit=1)[0]
+        has_dense_structure = bool(
+            re.search(r"^#{3,6}\s+|```|^\s*(?:[-*+]|\d+[.)])\s+", authored_context, flags=re.MULTILINE)
+        )
+        body_lines = len([line for line in authored_context.splitlines() if line.strip()])
+        if not has_dense_structure and body_lines <= 4:
+            cluster_gap = max(24, min(72, int(duration * 0.45)))
+        else:
+            cluster_gap = max(12, min(36, int(duration * 0.16)))
+        plan_start = int(getattr(plan, "start", 0) or 0)
+        for idx, current in enumerate(existing_plans):
+            if abs(plan_start - int(getattr(current, "start", 0) or 0)) < cluster_gap:
+                return idx
+        return None
+
+    @staticmethod
+    def _prefer_plan(candidate: Any, current: Any) -> Any:
+        candidate_score = float(getattr(candidate, "score", 0) or 0)
+        current_score = float(getattr(current, "score", 0) or 0)
+        if candidate_score > current_score + 0.08:
+            return candidate
+        if current_score > candidate_score + 0.08:
+            return current
+
+        candidate_reasons = set(getattr(candidate, "reasons", None) or [])
+        current_reasons = set(getattr(current, "reasons", None) or [])
+        valuable_reasons = {
+            "visual-inventory",
+            "high-detail-frame",
+            "result",
+            "code",
+            "ui",
+            "diagram",
+        }
+        candidate_reason_score = len(candidate_reasons & valuable_reasons)
+        current_reason_score = len(current_reasons & valuable_reasons)
+        if candidate_reason_score > current_reason_score:
+            return candidate
+        if current_reason_score > candidate_reason_score:
+            return current
+
+        # For the same document anchor, a later timestamp is usually the more
+        # complete state after the presenter finishes the operation.
+        return candidate if int(getattr(candidate, "start", 0) or 0) > int(getattr(current, "start", 0) or 0) else current

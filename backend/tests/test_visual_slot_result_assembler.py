@@ -116,6 +116,23 @@ def test_assembler_removes_failed_marker_and_reports_error():
     assert result.visual_report["slots"][0]["status"] == "failed"
 
 
+def test_assembler_skips_failed_optional_fallback_without_marking_failure():
+    markdown = "## Demo *Content-[00:00]\nVisual section.\n"
+
+    result = _assembler().assemble(
+        markdown,
+        [_slot_result(0, error="low quality candidate", mode="fallback")],
+        is_same_visual_state=lambda _left, _right: False,
+    )
+
+    assert result.markdown == markdown
+    assert result.failed_slots == 0
+    assert result.skipped_slots == 1
+    assert result.successful_slots == 0
+    assert result.diagnostics == ["fallback_skipped:0:low quality candidate"]
+    assert result.visual_report["slots"][0]["status"] == "skipped"
+
+
 def test_assembler_marks_duplicate_visual_state_for_cleanup():
     first = _candidate("first.jpg", 10, exact_hash="same")
     duplicate = _candidate("duplicate.jpg", 20, exact_hash="same")

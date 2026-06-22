@@ -23,6 +23,8 @@ from app.utils.logger import get_logger
 from app.utils.url_parser import extract_video_id
 
 logger = get_logger(__name__)
+_SESSION = requests.Session()
+_SESSION.trust_env = False
 
 UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -48,7 +50,7 @@ class BilibiliSubtitleFetcher:
     def _get_cid(self, bvid: str) -> Optional[int]:
         url = "https://api.bilibili.com/x/web-interface/view"
         try:
-            resp = requests.get(url, params={"bvid": bvid}, headers=self._headers(), timeout=10)
+            resp = _SESSION.get(url, params={"bvid": bvid}, headers=self._headers(), timeout=10)
             data = resp.json()
         except Exception as e:
             logger.warning(f"获取 cid 失败: {e}")
@@ -62,7 +64,7 @@ class BilibiliSubtitleFetcher:
     def _list_subtitles(self, bvid: str, cid: int) -> List[dict]:
         url = "https://api.bilibili.com/x/player/wbi/v2"
         try:
-            resp = requests.get(url, params={"bvid": bvid, "cid": cid}, headers=self._headers(), timeout=10)
+            resp = _SESSION.get(url, params={"bvid": bvid, "cid": cid}, headers=self._headers(), timeout=10)
             data = resp.json()
         except Exception as e:
             logger.warning(f"获取字幕列表失败: {e}")
@@ -101,7 +103,7 @@ class BilibiliSubtitleFetcher:
 
     def _fetch_body(self, subtitle_url: str) -> Optional[List[dict]]:
         try:
-            resp = requests.get(self._normalize_url(subtitle_url), headers=self._headers(), timeout=15)
+            resp = _SESSION.get(self._normalize_url(subtitle_url), headers=self._headers(), timeout=15)
             data = resp.json()
             return data.get("body") or []
         except Exception as e:

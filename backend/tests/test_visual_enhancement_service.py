@@ -162,7 +162,55 @@ class TestVisualEnhancementService(unittest.TestCase):
         self.assertTrue(changed)
         self.assertIn("one.jpg", payload["markdown"])
         self.assertEqual(status_updates[-1][1], "PARTIAL_SUCCESS")
-        self.assertIn("could not be completed", status_updates[-1][2])
+        self.assertIn("计划截图位未能完成", status_updates[-1][2])
+        reindex.assert_called_once_with("task-1")
+
+    def test_enhance_saved_note_treats_optional_skipped_slots_as_success(self):
+        VisualEnhancementService = self._load_service()
+        status_updates = []
+
+        class _StatusWriter:
+            def _update_status(self, task_id, status, message=None):
+                status_updates.append((task_id, getattr(status, "value", status), message))
+
+        class _ScreenshotAgent:
+            def __init__(self):
+                self.last_run_summary = {}
+
+            def insert_screenshots(self, markdown, video_path, duration, gpt, on_markdown_update=None):
+                self.last_run_summary = {
+                    "planned_slots": 3,
+                    "successful_slots": 1,
+                    "failed_slots": 0,
+                    "skipped_slots": 2,
+                    "duplicate_slots": 0,
+                    "diagnostics": ["fallback_skipped:42:no usable screenshot"],
+                }
+                return markdown + "\n![](/static/screenshots/one.jpg)\n"
+
+        with ProjectTempDir() as tmp_dir:
+            result_path = self._write_result(tmp_dir)
+
+            with patch.object(VisualEnhancementService, "_reindex_task") as reindex:
+                changed = VisualEnhancementService(
+                    tmp_dir,
+                    screenshot_agent_factory=_ScreenshotAgent,
+                    status_writer=_StatusWriter(),
+                ).enhance_saved_note(
+                    "task-1",
+                    "video.mp4",
+                    60,
+                    "bilibili",
+                    enhance_token="token-1",
+                    generation_token="generation-1",
+                )
+
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(changed)
+        self.assertIn("one.jpg", payload["markdown"])
+        self.assertEqual(status_updates[-1][1], "SUCCESS")
+        self.assertIn("已跳过 2 个", status_updates[-1][2])
         reindex.assert_called_once_with("task-1")
 
     def test_enhance_saved_note_persists_visual_report(self):
@@ -428,6 +476,72 @@ class TestVisualEnhancementService(unittest.TestCase):
         self.assertTrue(any("扫描视频画面" in (message or "") for _task, _status, message in status_updates))
         self.assertTrue(any("3 个候选画面" in (message or "") for _task, _status, message in status_updates))
 
+    def test_enhance_saved_note_publishes_visual_progress_report(self):
+        VisualEnhancementService = self._load_service()
+
+        class _ScreenshotAgent:
+            def __init__(self):
+                self.last_run_summary = {}
+
+            def insert_screenshots(
+                self,
+                markdown,
+                video_path,
+                duration,
+                gpt,
+                on_markdown_update=None,
+                transcript_segments=None,
+                on_stage_update=None,
+                on_progress_update=None,
+            ):
+                on_progress_update({
+                    "planned_slots": 3,
+                    "successful_slots": 0,
+                    "failed_slots": 0,
+                    "skipped_slots": 0,
+                    "duplicate_slots": 0,
+                    "status": "running",
+                })
+                on_markdown_update(
+                    markdown + "\n![](/static/screenshots/one.jpg)\n",
+                    12,
+                    "![](/static/screenshots/one.jpg)",
+                )
+                self.last_run_summary = {
+                    "planned_slots": 3,
+                    "successful_slots": 1,
+                    "failed_slots": 0,
+                    "skipped_slots": 1,
+                    "duplicate_slots": 1,
+                    "diagnostics": [],
+                }
+                on_progress_update(self.last_run_summary)
+                return markdown + "\n![](/static/screenshots/one.jpg)\n"
+
+        with ProjectTempDir() as tmp_dir:
+            result_path = self._write_result(tmp_dir)
+
+            with patch.object(VisualEnhancementService, "_reindex_task"):
+                changed = VisualEnhancementService(
+                    tmp_dir,
+                    screenshot_agent_factory=_ScreenshotAgent,
+                ).enhance_saved_note(
+                    "task-1",
+                    "video.mp4",
+                    60,
+                    "bilibili",
+                    enhance_token="token-1",
+                    generation_token="generation-1",
+                )
+
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(changed)
+        self.assertEqual(payload["visual_report"]["planned_slots"], 3)
+        self.assertEqual(payload["visual_report"]["successful_slots"], 1)
+        self.assertEqual(payload["visual_report"]["skipped_slots"], 1)
+        self.assertEqual(payload["visual_report"]["duplicate_slots"], 1)
+
     def test_enhance_saved_note_still_supports_legacy_screenshot_agent_signature(self):
         VisualEnhancementService = self._load_service()
         calls = []
@@ -498,7 +612,7 @@ class TestVisualEnhancementService(unittest.TestCase):
         self.assertTrue(changed)
         self.assertIn("incremental.jpg", payload["markdown"])
         self.assertEqual(status_updates[-1][1], "SUCCESS")
-        self.assertIn("key screenshots", status_updates[-1][2])
+        self.assertIn("关键截图已补充", status_updates[-1][2])
         reindex.assert_called_once_with("task-1")
 
     def test_enhance_saved_note_failure_keeps_base_note_successful(self):
@@ -566,7 +680,7 @@ class TestVisualEnhancementService(unittest.TestCase):
 
         self.assertFalse(changed)
         self.assertEqual(status_updates[-1][1], "PARTIAL_SUCCESS")
-        self.assertIn("did not find a usable image", status_updates[-1][2])
+        self.assertIn("没有找到可用图片", status_updates[-1][2])
 
     def test_enhance_saved_note_reindexes_partial_increment_after_later_failure(self):
         VisualEnhancementService = self._load_service()

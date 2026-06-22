@@ -580,7 +580,7 @@ class VisualEnhancementAgent:
                 request.enhance_token,
                 request.generation_token,
                 TaskStatus.PARTIAL_SUCCESS,
-                "Note is ready, but video file is missing so screenshots cannot be enhanced.",
+                "笔记已完成，但没有可用视频文件，无法补充截图。",
             )
             return None
 
@@ -596,7 +596,7 @@ class VisualEnhancementAgent:
                 request.enhance_token,
                 request.generation_token,
                 TaskStatus.PARTIAL_SUCCESS,
-                "Note is ready, but video file does not exist so screenshots cannot be enhanced.",
+                "笔记已完成，但视频文件不存在，无法补充截图。",
             )
             return None
 
@@ -627,7 +627,7 @@ class VisualEnhancementAgent:
                 request.enhance_token,
                 request.generation_token,
                 TaskStatus.PARTIAL_SUCCESS,
-                f"Note is ready, but screenshot enhancement could not be submitted: {exc}",
+                f"笔记已完成，但截图增强任务提交失败：{exc}",
             )
             return None
 
@@ -644,7 +644,7 @@ class VisualEnhancementAgent:
                     request.enhance_token,
                     request.generation_token,
                     TaskStatus.PARTIAL_SUCCESS,
-                    f"Note is ready, but screenshot enhancement failed: {exc}",
+                    f"笔记已完成，但截图增强失败：{exc}",
                 )
 
         future.add_done_callback(_on_done)

@@ -1,8 +1,10 @@
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+from fastapi import FastAPI, HTTPException
 import uvicorn
-from fastapi import FastAPI
+from fastapi.responses import FileResponse
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.staticfiles import StaticFiles
@@ -97,6 +99,35 @@ register_exception_handlers(app)
 app.mount(static_path, StaticFiles(directory=static_dir), name="static")
 app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
 
+
+frontend_dist_dir = Path(__file__).resolve().parent.parent / "BillNote_frontend" / "dist"
+frontend_index = frontend_dist_dir / "index.html"
+reserved_frontend_prefixes = {
+    "api",
+    static_path.strip("/").split("/", 1)[0] if static_path.strip("/") else "static",
+    "uploads",
+}
+
+if frontend_index.exists():
+    logger.info(f"Serving frontend build from {frontend_dist_dir}")
+
+    @app.get("/{frontend_path:path}", include_in_schema=False)
+    async def serve_frontend(frontend_path: str):
+        first_segment = frontend_path.split("/", 1)[0]
+        if first_segment in reserved_frontend_prefixes:
+            raise HTTPException(status_code=404)
+
+        requested_path = (frontend_dist_dir / frontend_path).resolve()
+        try:
+            requested_path.relative_to(frontend_dist_dir.resolve())
+        except ValueError:
+            raise HTTPException(status_code=404)
+
+        if requested_path.is_file():
+            return FileResponse(requested_path)
+        return FileResponse(frontend_index)
+else:
+    logger.info(f"Frontend build not found at {frontend_dist_dir}; backend API only")
 
 
 

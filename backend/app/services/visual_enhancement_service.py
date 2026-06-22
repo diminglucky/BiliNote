@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import tempfile
+import inspect
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,6 +40,7 @@ class VisualEnhancementService:
         gpt: Any,
         on_markdown_update: Callable[[str, int, str], None],
         on_stage_update: Optional[Callable[[str], None]] = None,
+        on_progress_update: Optional[Callable[[dict[str, Any]], None]] = None,
         transcript_segments: Optional[list[Any]] = None,
     ) -> str | None:
         self._last_screenshot_summary = {}
@@ -56,44 +58,65 @@ class VisualEnhancementService:
                 screenshot_func=generate_screenshot,
             )
 
+        result = self._call_insert_screenshots(
+            agent,
+            markdown,
+            video_path,
+            duration,
+            gpt,
+            on_markdown_update=on_markdown_update,
+            transcript_segments=transcript_segments,
+            on_stage_update=on_stage_update,
+            on_progress_update=on_progress_update,
+        )
+        self._capture_screenshot_summary(agent)
+        return result
+
+    @staticmethod
+    def _call_insert_screenshots(
+        agent: Any,
+        markdown: str,
+        video_path: Path,
+        duration: Optional[float],
+        gpt: Any,
+        **callbacks: Any,
+    ) -> str | None:
+        method = agent.insert_screenshots
         try:
-            result = agent.insert_screenshots(
+            signature = inspect.signature(method)
+            parameters = signature.parameters
+            accepts_kwargs = any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            )
+            supported_callbacks = (
+                callbacks
+                if accepts_kwargs
+                else {
+                    key: value
+                    for key, value in callbacks.items()
+                    if key in parameters
+                }
+            )
+            return method(markdown, video_path, duration, gpt, **supported_callbacks)
+        except (TypeError, ValueError) as exc:
+            raw = str(exc)
+            unexpected_kwarg = "unexpected keyword argument" in raw
+            if not unexpected_kwarg and not isinstance(exc, ValueError):
+                raise
+
+        try:
+            return method(
                 markdown,
                 video_path,
                 duration,
                 gpt,
-                on_markdown_update=on_markdown_update,
-                transcript_segments=transcript_segments,
-                on_stage_update=on_stage_update,
+                on_markdown_update=callbacks.get("on_markdown_update"),
             )
-            self._capture_screenshot_summary(agent)
-            return result
-        except TypeError as exc:
-            if "transcript_segments" not in str(exc) and "on_stage_update" not in str(exc):
+        except TypeError as retry_exc:
+            if "on_markdown_update" not in str(retry_exc):
                 raise
-            try:
-                result = agent.insert_screenshots(
-                    markdown,
-                    video_path,
-                    duration,
-                    gpt,
-                    on_markdown_update=on_markdown_update,
-                    transcript_segments=transcript_segments,
-                )
-                self._capture_screenshot_summary(agent)
-                return result
-            except TypeError as retry_exc:
-                if "transcript_segments" not in str(retry_exc):
-                    raise
-                result = agent.insert_screenshots(
-                    markdown,
-                    video_path,
-                    duration,
-                    gpt,
-                    on_markdown_update=on_markdown_update,
-                )
-                self._capture_screenshot_summary(agent)
-                return result
+            return method(markdown, video_path, duration, gpt)
 
     def enhance_saved_note(
         self,
@@ -122,7 +145,7 @@ class VisualEnhancementService:
                 self.status_writer,
                 task_id,
                 "ENHANCING",
-                message="Base note is ready; enhancing key screenshots asynchronously",
+                message="基础笔记已生成，正在异步补充关键截图",
             ):
                 return False
 
@@ -170,6 +193,16 @@ class VisualEnhancementService:
                     message=message,
                 )
 
+            def _publish_progress(summary: dict[str, Any]) -> None:
+                if not isinstance(summary, dict):
+                    return
+                latest_payload = self._load_result(result_path)
+                if not self._matches_token(latest_payload, enhance_token, generation_token):
+                    logger.info("Skip stale visual enhancement progress update (task_id=%s)", task_id)
+                    return
+                latest_payload["visual_report"] = summary
+                self._atomic_write_json(result_path, latest_payload)
+
             enhanced = self._insert_screenshots(
                 markdown=markdown,
                 video_path=Path(video_path),
@@ -177,6 +210,7 @@ class VisualEnhancementService:
                 gpt=gpt,
                 on_markdown_update=_publish_increment,
                 on_stage_update=_publish_stage,
+                on_progress_update=_publish_progress,
                 transcript_segments=transcript_segments,
             )
             screenshot_summary = self._last_screenshot_summary
@@ -214,7 +248,7 @@ class VisualEnhancementService:
                     if inserted_after > 0
                     else (
                         "PARTIAL_SUCCESS",
-                        "Note is ready, but screenshot enhancement did not find a usable image",
+                        "笔记已完成，但截图增强没有找到可用图片。",
                     )
                 )
                 self._atomic_write_json(result_path, latest_payload)
@@ -270,7 +304,7 @@ class VisualEnhancementService:
                 self.status_writer,
                 task_id,
                 "PARTIAL_SUCCESS",
-                message=f"Note is ready; screenshot enhancement failed: {exc}",
+                message=f"笔记已完成，但截图增强失败：{exc}",
             )
             return False
 
@@ -287,6 +321,7 @@ class VisualEnhancementService:
                 "planned_slots": int(getattr(state, "planned_slot_count", 0) or 0),
                 "successful_slots": int(getattr(state, "successful_slot_count", 0) or 0),
                 "failed_slots": int(getattr(state, "failed_slot_count", 0) or 0),
+                "skipped_slots": int(getattr(state, "skipped_slot_count", 0) or 0),
                 "duplicate_slots": int(getattr(state, "duplicate_slot_count", 0) or 0),
                 "diagnostics": list(getattr(state, "diagnostics", None) or []),
             })
@@ -304,17 +339,26 @@ class VisualEnhancementService:
         successful = int(summary.get("successful_slots") or inserted_count or 0)
         failed = int(summary.get("failed_slots") or 0)
         duplicate = int(summary.get("duplicate_slots") or 0)
-        unresolved = max(0, planned - successful - duplicate)
+        skipped = int(summary.get("skipped_slots") or 0)
+        unresolved = max(0, planned - successful - duplicate - skipped)
         if failed > 0 or unresolved > 0:
             return (
                 "PARTIAL_SUCCESS",
                 (
-                    "Note is ready; inserted "
-                    f"{max(inserted_count, successful)} key screenshot(s), "
-                    f"but {failed + unresolved} planned screenshot slot(s) could not be completed"
+                    "笔记已完成；已插入 "
+                    f"{max(inserted_count, successful)} 张关键截图，"
+                    f"但有 {failed + unresolved} 个计划截图位未能完成。"
                 ),
             )
-        return "SUCCESS", "Note is ready; key screenshots have been enhanced"
+        if skipped > 0:
+            return (
+                "SUCCESS",
+                (
+                    "笔记已完成，关键截图已补充；"
+                    f"已跳过 {skipped} 个没有合格画面的可选截图位。"
+                ),
+            )
+        return "SUCCESS", "笔记已完成，关键截图已补充。"
 
     @staticmethod
     def _matches_token(

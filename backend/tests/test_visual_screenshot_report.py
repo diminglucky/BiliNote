@@ -95,6 +95,7 @@ def test_summarize_visual_state_includes_report_plans_and_images():
         planned_slot_count=1,
         successful_slot_count=1,
         failed_slot_count=0,
+        skipped_slot_count=0,
         duplicate_slot_count=0,
         diagnostics=[],
         visual_plans=[plan],
@@ -105,6 +106,7 @@ def test_summarize_visual_state_includes_report_plans_and_images():
     summary = summarize_visual_state(state)
 
     assert summary["execution_engine"] == "langgraph"
+    assert summary["skipped_slots"] == 0
     assert summary["slots"][0]["status"] == "inserted"
     assert summary["plans"][0]["title"] == "Result"
     assert summary["images"][0]["url"] == "/static/screenshots/key.png"

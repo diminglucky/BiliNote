@@ -361,7 +361,7 @@ class TestNoteRouterCacheRecovery(unittest.TestCase):
                 json.dumps(
                     {
                         "status": TaskStatus.PARTIAL_SUCCESS.value,
-                        "message": "正文已生成，但截图增强没有完全完成",
+                        "message": "笔记已完成，部分截图未插入",
                         "generation_token": "generation-1",
                     },
                     ensure_ascii=False,
@@ -376,7 +376,7 @@ class TestNoteRouterCacheRecovery(unittest.TestCase):
             data = body["data"]
             self.assertEqual(data["status"], TaskStatus.PARTIAL_SUCCESS.value)
             self.assertEqual(data["result"]["markdown"], "## note without complete screenshots\n")
-            self.assertEqual(data["message"], "正文已生成，但截图增强没有完全完成")
+            self.assertEqual(data["message"], "笔记已完成，部分截图未插入")
             self.assertEqual(data["generation_token"], "generation-1")
 
     def test_newer_markdown_cache_replaces_stale_success_result(self):

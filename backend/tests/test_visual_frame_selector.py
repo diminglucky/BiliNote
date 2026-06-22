@@ -48,6 +48,70 @@ class _Reader:
         return 0.42, timestamp
 
 
+def test_frame_selector_does_not_sacrifice_clear_candidate_for_late_low_quality_frame():
+    class _ReaderWithScoreTrap:
+        @staticmethod
+        def _calculate_file_md5(path):
+            return pathlib.Path(path).name
+
+        @staticmethod
+        def _score_frame(path):
+            timestamp = int(pathlib.Path(path).stem.split("_")[-1])
+            scores = {
+                329: 0.64,
+                333: 0.36,
+                334: 0.36,
+                336: 0.12,
+                337: 0.33,
+            }
+            return scores.get(timestamp, 0.2), timestamp
+
+        @staticmethod
+        def _build_visual_segments(candidates):
+            by_ts = {candidate.timestamp: candidate for candidate in candidates}
+
+            class _Segment:
+                def __init__(self, start, end, representative, frames):
+                    self.start = start
+                    self.end = end
+                    self.representative = representative
+                    self.frames = frames
+
+                @property
+                def duration(self):
+                    return max(0, self.end - self.start)
+
+            return [
+                _Segment(329, 329, by_ts[329], [by_ts[329]]),
+                _Segment(333, 334, by_ts[334], [by_ts[333], by_ts[334]]),
+                _Segment(336, 337, by_ts[337], [by_ts[336], by_ts[337]]),
+            ]
+
+    with ProjectTempDir() as tmp_path:
+        def _generate(_video_path, _output_dir, timestamp, index):
+            path = tmp_path / f"shot_{index}_{timestamp}.jpg"
+            path.write_bytes(f"image-{timestamp}".encode())
+            return str(path)
+
+        selector = VisualFrameSelector(lambda _text: (0.0, []))
+
+        result = selector.select_near_timestamp(
+            ScreenshotCandidateSelectionRequest(
+                video_path=pathlib.Path("video.mp4"),
+                timestamp=329,
+                duration=400,
+                index=0,
+                visual_reader=_ReaderWithScoreTrap(),
+                image_output_dir=tmp_path,
+                screenshot_func=_generate,
+                search_end=338,
+            )
+        )
+
+        assert result.candidate.timestamp == 329
+        assert result.report["heuristic_score"] == 0.64
+
+
 def test_frame_selector_returns_candidate_and_diagnostic_report():
     with ProjectTempDir() as tmp_path:
         created = []

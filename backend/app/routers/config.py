@@ -92,7 +92,7 @@ def get_proxy_config():
     from app.services.proxy_config_manager import ProxyConfigManager
     mgr = ProxyConfigManager()
     cfg = mgr.get_config()
-    # effective 给前端展示「当前实际生效的代理」——可能来自配置，也可能来自 env 兜底
+    # effective 给前端展示「当前实际生效的代理」——来自设置页或 VIDEONOTE_PROXY_URL
     return R.success(data={
         **cfg,
         "effective": mgr.get_proxy_url() or "",
@@ -107,6 +107,49 @@ def update_proxy_config(data: ProxyConfigRequest):
     return R.success(data={
         **cfg,
         "effective": mgr.get_proxy_url() or "",
+    })
+
+
+def _proxy_runtime_status() -> dict:
+    """Return runtime proxy diagnostics without exposing secret values."""
+    from app.services.proxy_config_manager import ProxyConfigManager
+
+    env_proxy_keys = [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ]
+    env_proxy_present = {
+        key: bool(os.environ.get(key))
+        for key in env_proxy_keys
+    }
+    mgr = ProxyConfigManager()
+    cfg = mgr.get_config()
+    effective = mgr.get_proxy_url() or ""
+    return {
+        "config": cfg,
+        "effective": effective,
+        "uses_videonote_proxy_url": bool(os.environ.get("VIDEONOTE_PROXY_URL")),
+        "generic_env_proxy_present": env_proxy_present,
+        "generic_env_proxy_ignored": True,
+        "proxy_manager_file": str(Path(__file__).resolve().parents[1] / "services" / "proxy_config_manager.py"),
+    }
+
+
+@router.get("/runtime_diagnostics")
+def runtime_diagnostics():
+    """Lightweight endpoint for checking which backend process is actually serving requests."""
+    return R.success(data={
+        "backend": {
+            "status": "running",
+            "port": int(os.getenv("BACKEND_PORT", 8483)),
+            "cwd": str(Path.cwd()),
+            "config_router_file": str(Path(__file__).resolve()),
+        },
+        "proxy": _proxy_runtime_status(),
     })
 
 
@@ -408,4 +451,5 @@ async def deploy_status():
         "cuda": cuda_info,
         "whisper": whisper_info,
         "ffmpeg": {"available": ffmpeg_ok},
+        "proxy": _proxy_runtime_status(),
     })

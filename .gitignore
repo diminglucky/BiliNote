@@ -316,6 +316,7 @@ cython_debug/
 /note_results/
 /backend/note_results/
 /backend/benchmark_reports/
+/backend/benchmark_replays/
 /backend/data/
 /backend/static/screenshots/
 /backend/data/output_frames/
@@ -337,7 +338,10 @@ cython_debug/
 /backend/.runtime_tmp/
 /backend/.test_tmp/
 /backend/pytest_tmp/
+/backend/pytest_proxy_files/
+/backend/pytest_proxy_tmp/
 /backend/visual-temp-test-root/
+/.runtime_tmp/
 /.tmp/
 /BiliNote_frontend/.idea/*
 /BiliNote_frontend/src-tauri/bin/

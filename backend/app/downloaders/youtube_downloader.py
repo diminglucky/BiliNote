@@ -6,10 +6,10 @@ from typing import Union, Optional, List
 import yt_dlp
 
 from app.downloaders.base import Downloader, DownloadQuality
+from app.downloaders.common import apply_yt_dlp_proxy
 from app.downloaders.youtube_subtitle import YouTubeSubtitleFetcher
 from app.models.notes_model import AudioDownloadResult
 from app.models.transcriber_model import TranscriptResult
-from app.services.proxy_config_manager import ProxyConfigManager
 from app.utils.path_helper import get_data_dir
 from app.utils.url_parser import extract_video_id
 from app.utils.video_quality import (
@@ -26,11 +26,7 @@ logger = logging.getLogger(__name__)
 
 def _apply_proxy(ydl_opts: dict) -> dict:
     """YouTube 在国内需要代理。配置了全局代理就塞进 yt-dlp opts。"""
-    proxy = ProxyConfigManager().get_proxy_url()
-    if proxy:
-        ydl_opts['proxy'] = proxy
-        logger.info(f"yt-dlp 走代理: {proxy}")
-    return ydl_opts
+    return apply_yt_dlp_proxy(ydl_opts, "YouTube yt-dlp")
 
 
 class YoutubeDownloader(Downloader, ABC):

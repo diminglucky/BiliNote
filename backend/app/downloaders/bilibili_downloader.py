@@ -11,6 +11,7 @@ import yt_dlp
 
 from app.downloaders.base import Downloader, DownloadQuality, QUALITY_MAP
 from app.downloaders.bilibili_subtitle import BilibiliSubtitleFetcher
+from app.downloaders.common import apply_yt_dlp_proxy
 from app.models.notes_model import AudioDownloadResult
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
 from app.utils.path_helper import get_data_dir
@@ -27,6 +28,8 @@ from app.utils.video_quality import (
 )
 
 logger = logging.getLogger(__name__)
+_SESSION = requests.Session()
+_SESSION.trust_env = False
 
 BILIBILI_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -118,6 +121,7 @@ class BilibiliDownloader(Downloader, ABC):
         if self._cookiefile:
             ydl_opts['cookiefile'] = self._cookiefile
 
+        apply_yt_dlp_proxy(ydl_opts, "Bilibili audio yt-dlp")
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)
@@ -141,6 +145,7 @@ class BilibiliDownloader(Downloader, ABC):
         }
         if self._cookiefile:
             ydl_opts['cookiefile'] = self._cookiefile
+        apply_yt_dlp_proxy(ydl_opts, "Bilibili metadata yt-dlp")
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 return ydl.extract_info(video_url, download=False)
@@ -160,7 +165,7 @@ class BilibiliDownloader(Downloader, ABC):
         return headers
 
     def _api_get(self, url: str, params: dict) -> dict:
-        resp = requests.get(url, params=params, headers=self._headers(), timeout=20)
+        resp = _SESSION.get(url, params=params, headers=self._headers(), timeout=20)
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
@@ -219,7 +224,7 @@ class BilibiliDownloader(Downloader, ABC):
         for item in items:
             for url in self._stream_candidates(item):
                 try:
-                    with requests.get(url, headers=self._headers(), stream=True, timeout=(10, 120)) as resp:
+                    with _SESSION.get(url, headers=self._headers(), stream=True, timeout=(10, 120)) as resp:
                         resp.raise_for_status()
                         with open(output_path, "wb") as f:
                             for chunk in resp.iter_content(chunk_size=1024 * 1024):
@@ -404,6 +409,7 @@ class BilibiliDownloader(Downloader, ABC):
         if self._cookiefile:
             ydl_opts['cookiefile'] = self._cookiefile
 
+        apply_yt_dlp_proxy(ydl_opts, "Bilibili video yt-dlp")
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)
@@ -492,6 +498,7 @@ class BilibiliDownloader(Downloader, ABC):
             ydl_opts['cookiefile'] = self._cookiefile
             ydl_opts['http_headers'] = {'Referer': 'https://www.bilibili.com'}
 
+        apply_yt_dlp_proxy(ydl_opts, "Bilibili subtitle yt-dlp")
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)

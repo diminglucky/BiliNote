@@ -66,6 +66,7 @@ def summarize_visual_state(state: Any) -> dict[str, Any]:
         "planned_slots": int(getattr(state, "planned_slot_count", 0) or 0),
         "successful_slots": int(getattr(state, "successful_slot_count", 0) or 0),
         "failed_slots": int(getattr(state, "failed_slot_count", 0) or 0),
+        "skipped_slots": int(getattr(state, "skipped_slot_count", 0) or 0),
         "duplicate_slots": int(getattr(state, "duplicate_slot_count", 0) or 0),
         "diagnostics": list(getattr(state, "diagnostics", None) or []),
         "plans": [

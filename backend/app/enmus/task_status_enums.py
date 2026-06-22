@@ -26,7 +26,7 @@ class TaskStatus(str, enum.Enum):
             cls.ENHANCING: "增强截图中",
             cls.SAVING: "保存中",
             cls.SUCCESS: "完成",
-            cls.PARTIAL_SUCCESS: "部分完成",
+            cls.PARTIAL_SUCCESS: "已完成，部分截图跳过",
             cls.FAILED: "失败",
         }
         return desc_map.get(status, "未知状态")

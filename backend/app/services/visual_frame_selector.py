@@ -311,6 +311,23 @@ class VisualFrameSelector:
                 "selection_score": round(float(score), 4),
             })
         heuristic_best = max(scored_segments, key=lambda item: item[0])[1].representative
+        raw_best = max(
+            (segment.representative for segment in segments),
+            key=lambda item: item.score,
+        )
+        if raw_best.path != heuristic_best.path:
+            preferred_score = float(os.getenv("SCREENSHOT_PREFERRED_CANDIDATE_SCORE", "0.42"))
+            weak_gap = float(os.getenv("SCREENSHOT_WEAK_SELECTION_SCORE_GAP", "0.04"))
+            score_gap = raw_best.score - heuristic_best.score
+            if (
+                heuristic_best.score < preferred_score
+                and raw_best.score >= float(os.getenv("SCREENSHOT_MIN_CANDIDATE_SCORE", "0.34"))
+                and score_gap >= weak_gap
+            ):
+                report["heuristic_override"] = "clearer-candidate"
+                report["pre_override_timestamp"] = heuristic_best.timestamp
+                report["pre_override_score"] = round(float(heuristic_best.score), 4)
+                heuristic_best = raw_best
         report["heuristic_timestamp"] = heuristic_best.timestamp
         report["heuristic_score"] = round(float(heuristic_best.score), 4)
         return heuristic_best

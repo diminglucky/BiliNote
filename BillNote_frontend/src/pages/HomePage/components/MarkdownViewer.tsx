@@ -27,7 +27,6 @@ import MarkmapEditor from '@/pages/HomePage/components/MarkmapComponent.tsx'
 import ChatPanel from '@/pages/HomePage/components/ChatPanel.tsx'
 import VideoBanner from '@/pages/HomePage/components/VideoBanner.tsx'
 import {
-  isPartialSuccessTaskStatus,
   isRunningTaskStatus,
   taskStatusMessage,
   taskSteps,
@@ -208,6 +207,28 @@ const normalizeNestedTocOriginLinks = (markdown: string) =>
 
 const normalizeMarkdownForDisplay = (markdown: string) =>
   normalizeNestedTocOriginLinks(normalizeMarkdownToc(normalizeBrokenImageSyntax(markdown)))
+
+const asCount = (value: unknown) => {
+  const count = Number(value)
+  return Number.isFinite(count) && count > 0 ? count : 0
+}
+
+const visualReportSummary = (visualReport: any) => {
+  if (!visualReport || typeof visualReport !== 'object') return ''
+  const success = asCount(visualReport.successful_slots)
+  const planned = asCount(visualReport.planned_slots)
+  const skipped = asCount(visualReport.skipped_slots)
+  const duplicate = asCount(visualReport.duplicate_slots)
+  const failed = asCount(visualReport.failed_slots)
+  if (!success && !planned && !skipped && !duplicate && !failed) return ''
+
+  const parts = [`截图 ${success} 张`]
+  if (planned) parts.push(`计划 ${planned}`)
+  if (skipped) parts.push(`跳过 ${skipped}`)
+  if (duplicate) parts.push(`去重 ${duplicate}`)
+  if (failed) parts.push(`失败 ${failed}`)
+  return parts.join(' · ')
+}
 
 const dataUriToBlob = (dataUri: string) => {
   const match = dataUri.match(/^data:([^;,]+)?(;base64)?,(.*)$/)
@@ -576,10 +597,10 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
   const isRetrySubmitting = Boolean(currentTask?.isRetrySubmitting)
   const isTaskRunning = Boolean(currentTask && (isRunningTaskStatus(taskStatus) || isRetrySubmitting))
-  const isPartialSuccess = isPartialSuccessTaskStatus(taskStatus)
   const runningMessage = taskStatusMessage(taskStatus, taskMessage)
   const progressStatus = isRetrySubmitting ? 'PENDING' : taskStatus
   const progressMessage = isRetrySubmitting ? '正在提交重新生成请求，旧笔记会先保留' : runningMessage
+  const screenshotSummary = visualReportSummary(currentTask?.visualReport)
 
   // 缓存 ReactMarkdown components，仅在 baseURL 变化时重建
   const markdownComponents = useMemo(() => createMarkdownComponents(baseURL), [baseURL])
@@ -807,6 +828,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         setViewMode={setViewMode}
         isTaskRunning={Boolean(isTaskRunning)}
         taskStatus={progressStatus}
+        visualSummary={screenshotSummary}
       />
 
       {viewMode === 'map' ? (
@@ -837,6 +859,9 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                           <Loader2 className="h-4 w-4 animate-spin" />
                           <span>{progressMessage}</span>
                         </div>
+                        {screenshotSummary && (
+                          <div className="mb-2 text-xs text-amber-800">{screenshotSummary}</div>
+                        )}
                         <StepBar steps={taskSteps} currentStep={progressStatus} compact />
                       </div>
                     )}
@@ -859,11 +884,6 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                             重试
                           </Button>
                         </div>
-                      </div>
-                    )}
-                    {isPartialSuccess && (
-                      <div className="sticky top-0 z-10 border-b border-amber-200 bg-amber-50/95 px-5 py-3 text-sm text-amber-900 shadow-sm backdrop-blur">
-                        {taskMessage || '正文已生成，但截图增强没有完全完成。'}
                       </div>
                     )}
                     <div className="px-5 pt-5">

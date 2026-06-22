@@ -175,7 +175,7 @@ class TestNoteQualityBenchmark(unittest.TestCase):
             write_status_record(
                 "task-1",
                 TaskStatus.PARTIAL_SUCCESS,
-                message="正文已生成，但截图增强没有完全完成",
+                message="笔记已完成，部分截图未插入",
                 generation_token="generation-1",
                 output_dir=note_dir,
             )
@@ -396,6 +396,52 @@ class TestNoteQualityBenchmark(unittest.TestCase):
         self.assertIn("visual-slot:0:single-candidate-selection", report.issues)
         self.assertIn("visual-slot:0:low-selected-score:0.390", report.issues)
         self.assertIn("visual-slot:0:strict-review-not-used", report.issues)
+
+    def test_report_ignores_low_score_for_skipped_optional_visual_slots(self):
+        with ProjectTempDir() as tmp_dir:
+            root = pathlib.Path(tmp_dir)
+            note_dir = root / "note_results"
+            static_dir = root / "static"
+            note_dir.mkdir()
+            static_dir.mkdir()
+            markdown = (
+                "## Demo Section *Content-[00:00]*\n\n"
+                "This section has enough generated note content and one useful screenshot.\n"
+                "The optional skipped slot should not affect the visible note quality.\n"
+                "## AI Summary\n\n"
+                "Summary text.\n"
+            )
+            visual_report = {
+                "planned_slots": 2,
+                "successful_slots": 1,
+                "failed_slots": 0,
+                "skipped_slots": 1,
+                "duplicate_slots": 0,
+                "slots": [
+                    {
+                        "slot_id": 0,
+                        "status": "inserted",
+                        "selection": {"candidate_count": 2, "selected_score": 0.72},
+                    },
+                    {
+                        "slot_id": 1,
+                        "status": "skipped",
+                        "selection": {"candidate_count": 1, "selected_score": 0.05},
+                    },
+                ],
+            }
+            self._write_task_payload(note_dir, "task-1", markdown, visual_report=visual_report)
+            write_status_record(
+                "task-1",
+                TaskStatus.SUCCESS,
+                generation_token="generation-1",
+                output_dir=note_dir,
+            )
+
+            report = load_task_report("task-1", note_dir, static_dir)
+
+        self.assertNotIn("visual-slot:1:single-candidate-selection", report.issues)
+        self.assertNotIn("visual-slot:1:low-selected-score:0.050", report.issues)
 
 
 if __name__ == "__main__":

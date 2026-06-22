@@ -52,8 +52,7 @@ const ProxyConfig = () => {
     return <div className="text-xs text-gray-400">加载代理配置…</div>
   }
 
-  // env 兜底：配置没开但 effective 有值，说明来自 HTTP_PROXY 环境变量
-  const fromEnv = !enabled && !!effective
+  const fromExplicitEnv = !enabled && !!effective
 
   return (
     <div className="flex flex-col gap-2 rounded border border-neutral-200 p-3">
@@ -71,9 +70,9 @@ const ProxyConfig = () => {
         onChange={e => setUrl(e.target.value)}
         className="text-sm"
       />
-      {fromEnv && (
+      {fromExplicitEnv && (
         <p className="text-xs text-amber-600">
-          当前生效（来自环境变量）：{effective}
+          当前生效（来自 VIDEONOTE_PROXY_URL）：{effective}
         </p>
       )}
       {enabled && effective && (

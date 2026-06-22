@@ -245,19 +245,19 @@ class VideoReader:
 
         selected: list[FrameCandidate] = []
         selected_paths = set()
-        last_exact_hash = None
+        last_selected: FrameCandidate | None = None
         min_useful_score = 0.35
 
         for segment in segments:
             chosen = segment.representative
             if chosen.score < min_useful_score:
                 continue
-            if self.dedupe_enabled and chosen.exact_hash == last_exact_hash:
+            if self.dedupe_enabled and last_selected and self._is_repeated_selected_frame(last_selected, chosen):
                 continue
 
             selected.append(chosen)
             selected_paths.add(chosen.path)
-            last_exact_hash = chosen.exact_hash
+            last_selected = chosen
             if max_frames is not None and len(selected) >= max_frames:
                 break
 
@@ -274,6 +274,14 @@ class VideoReader:
             return True
         return False
 
+    def _is_repeated_selected_frame(self, left: FrameCandidate, right: FrameCandidate) -> bool:
+        if left.exact_hash == right.exact_hash:
+            return True
+        # pHash can collide for different slides, especially text-heavy frames.
+        # Only treat already-selected frames as duplicates when they are almost
+        # identical, leaving normal cross-window changes available to the note.
+        return self._hamming_distance(left.perceptual_hash, right.perceptual_hash) <= 1
+
     def _build_visual_segments(self, candidates: list[FrameCandidate]) -> list[VisualSegment]:
         ordered = sorted(candidates, key=lambda item: item.timestamp)
         if not ordered:
@@ -282,8 +290,10 @@ class VideoReader:
         segments: list[list[FrameCandidate]] = []
         current = [ordered[0]]
         anchor = ordered[0]
+        max_segment_span = max(1, int(self.frame_interval))
         for item in ordered[1:]:
-            if self.dedupe_enabled and self._is_same_visual_state(anchor, item):
+            same_window_span = item.timestamp - current[0].timestamp <= max_segment_span
+            if self.dedupe_enabled and same_window_span and self._is_same_visual_state(anchor, item):
                 current.append(item)
                 if item.score > anchor.score:
                     anchor = item

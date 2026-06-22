@@ -37,6 +37,7 @@ interface NoteHeaderProps {
   setViewMode: (mode: 'map' | 'preview') => void
   isTaskRunning?: boolean
   taskStatus?: string
+  visualSummary?: string
 }
 
 export function MarkdownHeader({
@@ -59,6 +60,7 @@ export function MarkdownHeader({
   setViewMode,
   isTaskRunning,
   taskStatus,
+  visualSummary,
 }: NoteHeaderProps) {
   const [copied, setCopied] = useState(false)
 
@@ -135,7 +137,12 @@ export function MarkdownHeader({
             )}
             {taskStatus === 'PARTIAL_SUCCESS' && (
               <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-700">
-                截图未完全完成
+                已完成，部分截图跳过
+              </Badge>
+            )}
+            {visualSummary && (
+              <Badge variant="outline" className="border-neutral-200 bg-white text-neutral-700">
+                {visualSummary}
               </Badge>
             )}
           </div>

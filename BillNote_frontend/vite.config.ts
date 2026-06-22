@@ -26,8 +26,8 @@ export default defineConfig(({ mode }) => {
   const envDir = process.env.DOCKER_BUILD ? __dirname : path.resolve(__dirname, '../')
   const env = loadEnv(mode, envDir)
 
-  const apiBaseUrl = env.VITE_API_BASE_URL || 'http://127.0.0.1:8483'
-  const port = parseInt(env.VITE_FRONTEND_PORT || '3015', 10)
+  const apiBaseUrl = process.env.VITE_API_BASE_URL || env.VITE_API_BASE_URL || 'http://127.0.0.1:8483'
+  const port = parseInt(process.env.VITE_FRONTEND_PORT || env.VITE_FRONTEND_PORT || '3015', 10)
   const appVersion = env.VITE_APP_VERSION || process.env.VITE_APP_VERSION || readAppVersion()
 
   return {

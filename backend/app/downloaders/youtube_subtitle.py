@@ -21,18 +21,19 @@ class YouTubeSubtitleFetcher:
         # 配了全局代理就给 youtube-transcript-api 套一个带 proxies 的 requests.Session，
         # 否则国内拉字幕同样会超时。代理未配置时退回默认无代理客户端。
         proxy = ProxyConfigManager().get_proxy_url()
+        import requests
+        session = requests.Session()
+        session.trust_env = False
         if proxy:
             try:
-                import requests
-                session = requests.Session()
                 session.proxies = {"http": proxy, "https": proxy}
                 self._api = YouTubeTranscriptApi(http_client=session)
                 logger.info(f"YouTube 字幕走代理: {proxy}")
             except Exception as e:
                 logger.warning(f"为 youtube-transcript-api 注入代理失败，回退无代理: {e}")
-                self._api = YouTubeTranscriptApi()
+                self._api = YouTubeTranscriptApi(http_client=session)
         else:
-            self._api = YouTubeTranscriptApi()
+            self._api = YouTubeTranscriptApi(http_client=session)
 
     def fetch_subtitles(
         self,

@@ -2,14 +2,17 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 
 class ProxyConfigManager:
     """全局代理配置，存 JSON 文件，支持前端动态修改。
 
     作用范围：LLM API + 转写 API（Groq 等）+ yt-dlp 视频下载。
-    优先级：配置文件里 enabled=true 的 url > 环境变量 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY。
-    这样桌面端/web 用户在设置页填，docker/服务器部署用环境变量兜底。
+    优先级：配置文件里 enabled=true 的 url > 专用环境变量 VIDEONOTE_PROXY_URL。
+
+    不读取通用 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY，避免本机、IDE 或运行沙箱里的
+    代理变量污染视频下载流程。
     """
 
     def __init__(self, filepath: str = "config/proxy.json"):
@@ -36,6 +39,11 @@ class ProxyConfigManager:
             "url": data.get("url", "") or "",
         }
 
+    @staticmethod
+    def _is_valid_proxy_url(url: str) -> bool:
+        parsed = urlparse(url)
+        return parsed.scheme in {"http", "https", "socks5", "socks5h"} and bool(parsed.netloc)
+
     def update_config(self, enabled: bool, url: Optional[str] = None) -> Dict[str, Any]:
         data = self._read()
         data["enabled"] = bool(enabled)
@@ -47,14 +55,16 @@ class ProxyConfigManager:
     def get_proxy_url(self) -> Optional[str]:
         """返回当前生效的代理 URL；没有则 None。
 
-        - 配置文件 enabled=true 且 url 非空 → 用配置的 url
-        - 否则回退到环境变量（标准的 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY，大小写都认）
+        - 配置文件 enabled=true 且 url 非空 → 用配置的 url。
+        - 否则只读取专用环境变量 VIDEONOTE_PROXY_URL。
+
+        这样可以避免本机/IDE/测试环境里的坏代理污染视频下载流程，例如
+        http://127.0.0.1:9 这种不可达代理会让 B 站接口直接失败。
         """
         cfg = self.get_config()
-        if cfg["enabled"] and cfg["url"]:
+        if cfg["enabled"] and cfg["url"] and self._is_valid_proxy_url(cfg["url"]):
             return cfg["url"]
-        for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
-            val = os.environ.get(key)
-            if val:
-                return val
+        env_proxy = os.environ.get("VIDEONOTE_PROXY_URL", "").strip()
+        if env_proxy and self._is_valid_proxy_url(env_proxy):
+            return env_proxy
         return None

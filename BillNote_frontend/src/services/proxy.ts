@@ -3,7 +3,7 @@ import request from '@/utils/request'
 export interface ProxyConfig {
   enabled: boolean
   url: string
-  /** 后端实际生效的代理（可能来自配置，也可能来自 HTTP_PROXY 环境变量兜底） */
+  /** 后端实际生效的代理。除设置页外，仅专用环境变量 VIDEONOTE_PROXY_URL 会生效。 */
   effective: string
 }
 

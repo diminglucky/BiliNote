@@ -84,11 +84,14 @@ class VisualScreenshotState:
     planned_slot_count: int = 0
     successful_slot_count: int = 0
     failed_slot_count: int = 0
+    skipped_slot_count: int = 0
     duplicate_slot_count: int = 0
     execution_engine: str = "local"
     on_markdown_update: Optional[Callable[[str, int, str], None]] = None
     on_stage_update: Optional[Callable[[str], None]] = None
+    on_progress_update: Optional[Callable[[dict[str, Any]], None]] = None
     visual_report: Optional[dict[str, Any]] = None
+    stage_update_lock: Optional[threading.Lock] = None
 
 
 class VisualScreenshotAgent:
@@ -138,6 +141,7 @@ class VisualScreenshotAgent:
         on_markdown_update: Optional[Callable[[str, int, str], None]] = None,
         transcript_segments: Optional[List[Any]] = None,
         on_stage_update: Optional[Callable[[str], None]] = None,
+        on_progress_update: Optional[Callable[[dict[str, Any]], None]] = None,
     ) -> str | None:
         state = self.run(VisualScreenshotState(
             markdown=markdown,
@@ -147,6 +151,7 @@ class VisualScreenshotAgent:
             on_markdown_update=on_markdown_update,
             transcript_segments=transcript_segments,
             on_stage_update=on_stage_update,
+            on_progress_update=on_progress_update,
         ))
         self.last_run_state = state
         self.last_run_summary = self.summarize_run(state)
@@ -180,6 +185,8 @@ class VisualScreenshotAgent:
     def prepare_state(self, state: VisualScreenshotState) -> VisualScreenshotState:
         if state.diagnostics is None:
             state.diagnostics = []
+        if state.stage_update_lock is None:
+            state.stage_update_lock = threading.Lock()
         state.markdown = normalize_screenshot_markers(state.markdown)
         state.matches = extract_screenshot_timestamps(state.markdown)
         if state.visual_inventory is None:
@@ -212,9 +219,24 @@ class VisualScreenshotAgent:
         if not state.on_stage_update:
             return
         try:
-            state.on_stage_update(message)
+            if state.stage_update_lock is None:
+                state.stage_update_lock = threading.Lock()
+            with state.stage_update_lock:
+                state.on_stage_update(message)
         except Exception as exc:
             logger.warning("截图阶段状态更新失败: %s", exc)
+
+    @staticmethod
+    def publish_progress_update(state: VisualScreenshotState, summary: dict[str, Any]) -> None:
+        if not state.on_progress_update:
+            return
+        try:
+            if state.stage_update_lock is None:
+                state.stage_update_lock = threading.Lock()
+            with state.stage_update_lock:
+                state.on_progress_update(summary)
+        except Exception as exc:
+            logger.warning("截图进度摘要更新失败: %s", exc)
 
     def build_visual_inventory(
         self,
@@ -276,6 +298,25 @@ class VisualScreenshotAgent:
 
     def plan_slots_node(self, state: VisualScreenshotState) -> VisualScreenshotState:
         state.slots = self.plan_screenshot_slots(state)
+        slot_count = len(state.slots or [])
+        if slot_count:
+            self.publish_progress_update(
+                state,
+                {
+                    "planned_slots": slot_count,
+                    "successful_slots": 0,
+                    "failed_slots": 0,
+                    "skipped_slots": 0,
+                    "duplicate_slots": 0,
+                    "status": "running",
+                },
+            )
+            self.publish_stage_update(
+                state,
+                f"已规划 {slot_count} 个截图位置，正在并行筛选清晰画面",
+            )
+        else:
+            self.publish_stage_update(state, "没有发现需要补充截图的位置，正在完成笔记")
         return state
 
     def plan_screenshot_slots(self, state: VisualScreenshotState) -> List[VisualScreenshotSlot]:
@@ -288,6 +329,13 @@ class VisualScreenshotAgent:
     ) -> VisualScreenshotSlotResult:
         generated_paths: List[str] = []
         plan = slot.plan
+        self.publish_stage_update(
+            state,
+            (
+                f"正在筛选第 {slot.slot_id + 1} 个截图位置"
+                f"（约 {int(slot.timestamp)} 秒）"
+            ),
+        )
         with self._slot_semaphore:
             selection_report: dict[str, Any] = {}
             try:
@@ -314,8 +362,13 @@ class VisualScreenshotAgent:
                     raise RuntimeError(f"未找到可用截图候选: {slot.timestamp}")
                 if not Path(candidate.path).exists():
                     raise FileNotFoundError(candidate.path)
-                if candidate.score < 0.42:
-                    raise RuntimeError(f"截图候选质量过低: {candidate.score:.3f}")
+                self.publish_stage_update(
+                    state,
+                    (
+                        f"已选中第 {slot.slot_id + 1} 个截图位置"
+                        f"（约 {int(candidate.timestamp)} 秒）"
+                    ),
+                )
                 return VisualScreenshotSlotResult(
                     slot=slot,
                     candidate=candidate,
@@ -381,8 +434,10 @@ class VisualScreenshotAgent:
         state.planned_slot_count = assembly.planned_slots
         state.successful_slot_count = assembly.successful_slots
         state.failed_slot_count = assembly.failed_slots
+        state.skipped_slot_count = assembly.skipped_slots
         state.duplicate_slot_count = assembly.duplicate_slots
         state.visual_report = assembly.visual_report
+        self.publish_progress_update(state, self.summarize_run(state))
 
     @staticmethod
     def prefer_line_placement(

@@ -35,11 +35,13 @@ def build_openai_client(
     if timeout is not None:
         kwargs["timeout"] = timeout
 
+    import httpx
+
     proxy_url = ProxyConfigManager().get_proxy_url()
+    http_client_kwargs = {"timeout": timeout or 600.0, "trust_env": False}
     if proxy_url:
-        # 延迟 import httpx：仅在确实要走代理时才需要
-        import httpx
-        kwargs["http_client"] = httpx.Client(proxy=proxy_url, timeout=timeout or 600.0)
+        http_client_kwargs["proxy"] = proxy_url
         logger.info(f"OpenAI 客户端走代理: {proxy_url}")
+    kwargs["http_client"] = httpx.Client(**http_client_kwargs)
 
     return OpenAI(**kwargs)

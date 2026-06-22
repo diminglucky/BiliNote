@@ -122,7 +122,12 @@ def load_task_report(
         issues.append(f"partial-success:{message}" if message else "partial-success")
     if payload.get("enhance_token") and status_payload.get("status") == "SUCCESS" and not images:
         issues.append("screenshot-enhancement-finished-without-images")
-    issues.extend(collect_visual_report_issues(visual_report))
+    issues.extend(
+        collect_visual_report_issues(
+            visual_report,
+            source_limited_screenshots=source_limited_screenshots,
+        )
+    )
 
     return NoteQualityReport(
         task_id=task_id,
@@ -342,7 +347,10 @@ def collect_note_issues(
     return issues
 
 
-def collect_visual_report_issues(visual_report: dict[str, Any]) -> list[str]:
+def collect_visual_report_issues(
+    visual_report: dict[str, Any],
+    source_limited_screenshots: bool = False,
+) -> list[str]:
     issues: list[str] = []
     visual_planned = int(visual_report.get("planned_slots") or 0)
     visual_successful = int(visual_report.get("successful_slots") or 0)
@@ -360,11 +368,15 @@ def collect_visual_report_issues(visual_report: dict[str, Any]) -> list[str]:
         selection = slot.get("selection") or {}
         if not isinstance(selection, dict):
             continue
+        status = str(slot.get("status") or "")
+        if status == "skipped":
+            continue
         candidate_count = int(selection.get("candidate_count") or 0)
-        if candidate_count == 1:
+        if candidate_count == 1 and not source_limited_screenshots:
             issues.append(f"visual-slot:{slot_id}:single-candidate-selection")
         selected_score = _safe_float(selection.get("selected_score"))
-        if selected_score is not None and selected_score < 0.42:
+        min_selected_score = 0.38 if source_limited_screenshots else 0.42
+        if selected_score is not None and selected_score < min_selected_score:
             issues.append(f"visual-slot:{slot_id}:low-selected-score:{selected_score:.3f}")
         review_mode = str(selection.get("review_mode") or "")
         if review_mode == "strict" and not selection.get("review_used"):

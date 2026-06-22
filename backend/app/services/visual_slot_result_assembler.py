@@ -25,6 +25,7 @@ class VisualSlotAssemblyResult:
     planned_slots: int = 0
     successful_slots: int = 0
     failed_slots: int = 0
+    skipped_slots: int = 0
     duplicate_slots: int = 0
     visual_report: dict[str, Any] = field(default_factory=dict)
 
@@ -62,19 +63,32 @@ class VisualSlotResultAssembler:
                 slot_report["selection"] = result.selection_report
 
             if result.error or result.candidate is None:
-                output.failed_slots += 1
+                optional_slot = slot.mode != "marker"
+                if optional_slot:
+                    output.skipped_slots += 1
+                else:
+                    output.failed_slots += 1
                 slot_report.update({
-                    "status": "failed",
+                    "status": "skipped" if optional_slot else "failed",
                     "reason": result.error or "missing-candidate",
                 })
                 slot_reports.append(slot_report)
-                output.diagnostics.append(f"{slot.mode}_failed:{slot.timestamp}:{result.error}")
-                logger.warning(
-                    "截图 slot 失败 (mode=%s timestamp=%s): %s",
-                    slot.mode,
-                    slot.timestamp,
-                    result.error,
-                )
+                diagnostic_status = "skipped" if optional_slot else "failed"
+                output.diagnostics.append(f"{slot.mode}_{diagnostic_status}:{slot.timestamp}:{result.error}")
+                if optional_slot:
+                    logger.info(
+                        "跳过可选截图 slot (mode=%s timestamp=%s): %s",
+                        slot.mode,
+                        slot.timestamp,
+                        result.error,
+                    )
+                else:
+                    logger.warning(
+                        "截图 slot 失败 (mode=%s timestamp=%s): %s",
+                        slot.mode,
+                        slot.timestamp,
+                        result.error,
+                    )
                 if slot.mode == "marker" and slot.marker:
                     output.markdown = output.markdown.replace(slot.marker, "", 1)
                 continue

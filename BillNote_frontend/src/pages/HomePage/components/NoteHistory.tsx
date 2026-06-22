@@ -144,7 +144,7 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
                 )}
                 {isPartialSuccessTaskStatus(task.status) && (
                   <div className="rounded-full bg-amber-100 px-2 py-0.5 text-center font-medium text-amber-700">
-                    部分完成
+                    已完成·缺截图
                   </div>
                 )}
                 {isRunningTaskStatus(task.status) ? (
